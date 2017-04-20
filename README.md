@@ -30,17 +30,17 @@ v = doc.unflatten(box.space.test, box.space.test:get(1))
 ## Interface
 
 ### `doc.init()`
-    Initializes internal structures. Call it before any other stuff.
+Initializes internal structures. Call it before any other stuff.
 
 ### `doc.flatten(space, tbl)`
-    Converts table `tbl` to flat array, updating schema for space `space` as necessary.
+Converts table `tbl` to flat array, updating schema for space `space` as necessary.
 
 ### `doc.unflatten(space, tbl)`
-    Converts flat array `tbl` to a nested document, according to schema for space `space`.
+Converts flat array `tbl` to a nested document, according to schema for space `space`.
 
 ### `create_index(index_name, options)`
-    Behaves similar to `box.space.create_index()`, but allows to specify string field names in addition to numeric in `parts`.
+Behaves similar to `box.space.create_index()`, but allows to specify string field names in addition to numeric in `parts`.
 
 ### `field_key(space, field_name)`
-    Returns integer key for field named `field_name` in a flattened document.
-    If you need a key for nested documents, use dot notation, like: `"foo.bar.id"`.
+Returns integer key for field named `field_name` in a flattened document.
+If you need a key for nested documents, use dot notation, like: `"foo.bar.id"`.
