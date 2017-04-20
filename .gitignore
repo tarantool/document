@@ -1,0 +1,6 @@
+*.snap
+*.xlog
+*.xctl
+*.vymeta
+.dependencies
+.*.swp
