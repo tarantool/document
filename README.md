@@ -1,4 +1,4 @@
-# Doc: store nested documents in Tarantool
+# Store nested documents in Tarantool
 
 Using this module you can store and retrieve dictionaries with very
 little overhead. It figures out document schema on the fly, and
@@ -9,7 +9,7 @@ The schema is stored and updated transparently.
 ## Getting started
 
 ```lua
-doc = require 'doc'
+doc = require 'document'
 
 box.cfg{}
 doc.init()
