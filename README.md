@@ -12,7 +12,6 @@ The schema is stored and updated transparently.
 doc = require 'document'
 
 box.cfg{}
-doc.init()
 
 box.schema.create_space("test", {if_not_exists = true})
 doc.create_index(box.space.test, "primary",

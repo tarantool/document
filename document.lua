@@ -4,15 +4,6 @@ local math = require("math")
 local prefix = "_doc_"
 local schema_space = nil
 
-local function init()
-    schema_space = box.schema.create_space(prefix .. "schema",
-                                           {if_not_exists = true})
-    schema_space:create_index("primary", {
-                                  parts = { 1, 'unsigned' },
-                                  if_not_exists = true
-    })
-end
-
 local function is_array(table)
     local max = 0
     local count = 0
@@ -29,6 +20,25 @@ local function is_array(table)
     end
 
     return true
+end
+
+local function get_tarantool_type(value)
+    local type_name = type(value)
+    if type_name == "string" then
+        return "string"
+    elseif type_name == "number" then
+        return "scalar"
+    elseif type_name == "boolean" then
+        return "scalar"
+    elseif type_name == "table" then
+        if is_array(value) then
+            return "array"
+        else
+            return "map"
+        end
+    end
+
+    return nil
 end
 
 local function split(inputstr, sep)
@@ -59,123 +69,158 @@ end
 
 
 local function get_schema(space)
-    local res = schema_space:get(space.id)
+    local function schema_decode(path, schema)
 
-    if res == nil then
-        return {}
     end
 
-    return res[2]
+    local _space = box.space._space
+    local format = _space:get(space.id)[7]
+    return format or {}
 end
 
 local function set_schema(space, schema)
-    schema_space:put({space.id, schema})
-end
+    local function schema_encode(path, schema)
 
-local function conforms_to_schema(tbl, schema)
-    for k,v in pairs(tbl) do
-        if type(v) == "table" then
-            if schema[k] == nil or not conforms_to_schema(v, schema[k]) then
-                return false
-            end
-        else
-            if schema[k] == nil then
-                return false
-            end
-        end
     end
-    return true
+
+    local _space = box.space._space
+    _space:update(space.id, {{'=', 7, schema}})
 end
 
 local function schema_get_max_index(schema)
     local max_index = 0
 
-    for _, v in pairs(schema or {}) do
-        if type(v) == "table" then
-            max_index = math.max(max_index, schema_get_max_index(v))
-        else
-            max_index = math.max(max_index, v)
-        end
+    for i, _ in ipairs(schema or {}) do
+        max_index = math.max(max_index, i)
     end
     return max_index
 end
 
-
 local function extend_schema(tbl, schema)
-    local function extend_schema_rec(tbl, schema, max_index)
-        schema = shallowcopy(schema)
+    local function extend_schema_rec(tbl, schema, inv_schema, path, max_index)
         for k, v in pairs(tbl) do
+            if path == nil then
+                subpath = k
+            else
+                subpath = path .. "." .. k
+            end
+
             if type(v) == "table" then
                 local new_schema = nil
-                new_schema, max_index = extend_schema_rec(
-                    v, schema[k] or {}, max_index)
-                schema[k] = new_schema
-            elseif schema[k] == nil then
+                max_index = extend_schema_rec(
+                    v, schema, inv_schema, subpath, max_index)
+            elseif inv_schema[subpath] == nil then
                 max_index = max_index + 1
-                schema[k] = max_index
+                schema[max_index] = {[subpath] = get_tarantool_type(v)}
             end
         end
 
-        return schema, max_index
+        return max_index
+    end
+
+    schema = shallowcopy(schema)
+
+    local inv_schema = {}
+
+    for i, v in ipairs(schema) do
+        for k, _ in pairs(v) do
+            inv_schema[k] = i
+        end
     end
 
     local max_index = schema_get_max_index(schema)
 
-    schema, _ = extend_schema_rec(tbl, schema or {}, max_index)
+    extend_schema_rec(tbl, schema, inv_schema, nil, max_index)
     return schema
 end
 
 local function flatten_table(tbl, schema)
-    local function flatten_table_rec(res, tbl, schema)
-        for k, v in pairs(tbl) do
-            if type(v) == "table" then
-                flatten_table_rec(res, v, schema[k])
+    local function flatten_rec(res, path, schema, tbl)
+        for k,v in pairs(tbl) do
+
+            if path == nil then
+                subpath = k
             else
-                res[schema[k]] = v
+                subpath = path .. "." .. k
+            end
+
+            if type(v) == "table" then
+                local status = flatten_rec(res, subpath, schema, v)
+                if status == nil then
+                    return nil
+                end
+            else
+                local i = schema[subpath]
+                if i == nil then
+                    return nil
+                end
+                res[i] = v
             end
         end
+
         return res
     end
 
-    if tbl == nil then
-        return nil
+    local inv_schema = {}
+
+    for i, v in ipairs(schema) do
+        for k, _ in pairs(v) do
+            inv_schema[k] = i
+        end
     end
 
-    return flatten_table_rec({}, tbl, schema)
+    return flatten_rec({}, nil, inv_schema, tbl)
 end
 
 local function unflatten_table(tbl, schema)
-    local function unflatten_table_rec(tbl, schema)
-        local res = {}
-        local is_empty = true
-        for k, v in pairs(schema) do
-            if type(v) == "table" then
-                local subres = unflatten_table_rec(tbl, v)
-                if subres ~= nil then
-                    res[k] = subres
-                    is_empty = false
+    local res = {}
+
+    local function add_entry(res, key, entry)
+        if string.find(key, '.', 1, true) == nil then
+            res[key] = entry
+        else
+            local strend = nil
+            local node = res
+            local subkey = nil
+            local i = 1
+            while i < #key do
+
+                strend = string.find(key, '.', i, true)
+                if strend ~= nil then
+                    subkey = string.sub(key, i, strend-1)
+                else
+                    subkey = string.sub(key, i, strend)
                 end
-            elseif tbl[v] ~= nil then
-                res[k] = tbl[v]
-                is_empty = false
+
+                if strend == nil then
+                    node[subkey] = entry
+                    break
+                else
+                    if node[subkey] == nil then
+                        node[subkey] = {}
+                    end
+                    node = node[subkey]
+                    i = strend + 1
+                end
             end
         end
-        if is_empty then
-            return nil
+    end
+
+    for i, v in ipairs(schema) do
+        for k, _ in pairs(v) do
+            add_entry(res, k, tbl[i])
         end
-
-        return res
     end
+    return res
 
-    if tbl == nil then
-        return nil
-    end
-
-    return unflatten_table_rec(tbl, schema)
 end
 
-
 local function flatten(space, tbl)
+    if space.id == nil then
+        local schema = space
+        return flatten_table(tbl, schema)
+    end
+
     if tbl == nil then
         return nil
     end
@@ -190,10 +235,14 @@ local function flatten(space, tbl)
 
     local schema = get_schema(space)
 
-    if not conforms_to_schema(tbl, schema) then
-        schema = extend_schema(tbl, schema)
-        set_schema(space, schema)
+    local result = flatten_table(tbl, schema)
+
+    if result ~= nil then
+        return result
     end
+
+    schema = extend_schema(tbl, schema)
+    set_schema(space, schema)
 
     return flatten_table(tbl, schema)
 end
@@ -208,57 +257,35 @@ local function unflatten(space, tbl)
     return unflatten_table(tbl, schema)
 end
 
+local function schema_add_path(schema, path, path_type)
 
-local function flatten_key(schema, key)
-    if type(key) == table then
-        tbl = {}
-        for k, v in ipairs(key) do
-            tbl[k] = flatten_key(v)
-        end
-        return tbl
-    elseif type(key) == "string" then
-        return schema_get_field_key(schema, key)
-    else
-        return key
-    end
-end
-
-local function schema_add_path(schema, path)
-    local path_dict = split(path, ".")
-
-    local root = schema
-    for k, v in ipairs(path_dict) do
-        if k ~= #path_dict then
-            if schema[v] == nil then
-                schema[v] = {}
-                schema = schema[v]
-            else
-                schema = schema[v]
+    for _, v in ipairs(schema) do
+        for k, _ in pairs(v) do
+            if k == path then
+                return
             end
-        else
-            local max_index = schema_get_max_index(root)
-
-            schema[v] = max_index + 1
         end
     end
-    return root
+
+    local max_index = schema_get_max_index(schema)
+
+    schema = shallowcopy(schema)
+
+    schema[max_index+1] = { [path] = path_type }
+
+    return schema
 end
 
 local function schema_get_field_key(schema, path)
-    local path_dict = split(path, ".")
-
-    for k, v in ipairs(path_dict) do
-        schema = schema[v]
-        if schema == nil then
-            return nil
+    for i, v in ipairs(schema) do
+        for k, _ in pairs(v) do
+            if k == path then
+                return i
+            end
         end
     end
 
-    if type(schema) == "table" then
-        return nil
-    end
-
-    return schema
+    return nil
 end
 
 local function field_key(space, path)
@@ -288,7 +315,7 @@ local function create_index(space, index_name, orig_options)
             if type(v) == "string" then
                 local field_key = schema_get_field_key(schema, v)
                 if field_key == nil then
-                    schema = schema_add_path(schema, v)
+                    schema = schema_add_path(schema, v, options.parts[k+1])
                     set_schema(space, schema)
                     field_key = schema_get_field_key(schema, v)
                 end
@@ -306,8 +333,7 @@ local function create_index(space, index_name, orig_options)
 
 end
 
-return {init = init,
-        flatten = flatten,
+return {flatten = flatten,
         unflatten = unflatten,
         create_index = create_index,
         field_key = field_key}
