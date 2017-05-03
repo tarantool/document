@@ -31,9 +31,6 @@ v = doc.unflatten(box.space.test, box.space.test:get(1))
 
 ## Interface
 
-### `doc.init()`
-Initializes internal structures. Call it before any other stuff.
-
 ### `doc.flatten(space, tbl)`
 Converts table `tbl` to flat array, updating schema for space `space` as necessary.
 
