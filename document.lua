@@ -2,7 +2,6 @@
 
 local math = require("math")
 local ffi = require 'ffi'
-local builtin = ffi.C
 
 local MAX_REMOTE_CONNS_TO_CACHE = 100
 
@@ -140,9 +139,9 @@ end
 
 local function get_schema(space)
     if space.remote == nil then
-        if local_schema_id ~= builtin.sc_version then
+        if local_schema_id ~= box.internal.schema_version() then
             local_schema_cache = {}
-            local_schema_id = builtin.sc_version
+            local_schema_id = box.internal.schema_version()
         end
 
         local cached = local_schema_cache[space.id]
