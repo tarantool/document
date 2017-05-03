@@ -6,6 +6,9 @@ progressively updates it when new fields are received.
 
 The schema is stored and updated transparently.
 
+This module works with local space objects, as well as with net.box
+space objects.
+
 ## Getting started
 
 ```lua
