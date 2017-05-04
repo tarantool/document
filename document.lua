@@ -7,6 +7,7 @@ local MAX_REMOTE_CONNS_TO_CACHE = 100
 
 local local_schema_cache = {}
 local remote_schema_cache = {}
+setmetatable(remote_schema_cache, { __mode = 'k' })
 
 local local_schema_id = nil
 local remote_schema_id = {}
@@ -138,7 +139,7 @@ local function unflatten_schema(schema)
 end
 
 local function get_schema(space)
-    if space.remote == nil then
+    if space.connection == nil then
         if local_schema_id ~= box.internal.schema_version() then
             local_schema_cache = {}
             local_schema_id = box.internal.schema_version()
@@ -154,9 +155,9 @@ local function get_schema(space)
 
         return cached
     else
-        local remote = space:remote()
+        local remote = space.connection
 
-        local conn_id = remote:connection_id()
+        local conn_id = remote
         local conn = remote_schema_cache[conn_id]
 
         if not conn then
@@ -171,9 +172,10 @@ local function get_schema(space)
 
         local schema_id = remote_schema_id[conn_id]
 
-        if schema_id ~= remote:schema_id() then
+        if schema_id ~= remote.schema_version then
             conn = {}
             remote_schema_cache[conn_id] = conn
+            remote_schema_id[conn_id] = remote.schema_version
         end
 
         local cached = conn[space.id]
@@ -195,12 +197,12 @@ local function set_schema(space, schema, old_schema)
     schema = flatten_schema(schema)
     old_schema = flatten_schema(old_schema)
 
-    if space.remote == nil then
+    if space.connection == nil then
         space:format(schema)
     else
 
-        local remote = space:remote()
-        local result = remote:call('_document_remote_set_schema', space.id, schema, old_schema)
+        local remote = space.connection
+        local result = remote:call('_document_remote_set_schema', {space.id, schema, old_schema})
         if result ~= nil then
             remote:reload_schema()
         end
@@ -368,7 +370,7 @@ local function flatten(space_or_schema, tbl)
     end
 
     local new_schema = nil
-    if space_or_schema.remote == nil then
+    if space_or_schema.connection == nil then
         new_schema = extend_schema(tbl, schema)
         set_schema(space_or_schema, new_schema)
     else
