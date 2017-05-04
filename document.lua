@@ -156,7 +156,7 @@ local function get_schema(space)
     else
         local remote = space:remote()
 
-        local conn_id = remote._connection_id
+        local conn_id = remote:connection_id()
         local conn = remote_schema_cache[conn_id]
 
         if not conn then
@@ -171,7 +171,7 @@ local function get_schema(space)
 
         local schema_id = remote_schema_id[conn_id]
 
-        if schema_id ~= remote._schema_id then
+        if schema_id ~= remote:schema_id() then
             conn = {}
             remote_schema_cache[conn_id] = conn
         end
