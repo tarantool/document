@@ -1,7 +1,7 @@
 #!/usr/bin/env tarantool
 
-local math = require("math")
-local ffi = require 'ffi'
+local math = require('math')
+local json = require('json')
 
 local MAX_REMOTE_CONNS_TO_CACHE = 100
 
@@ -40,6 +40,10 @@ local function split(inputstr, sep)
                 i = i + 1
         end
         return t
+end
+
+local function startswith(str1, str2)
+    return string.sub(str1, 1, string.len(str2)) == str2
 end
 
 local function get_tarantool_type(value)
@@ -448,10 +452,29 @@ local function schema_get_field_key(schema, path)
     return schema[1]
 end
 
-local function field_key(space, path)
-    local schema = get_schema(space)
+local function field_key(space_or_schema, path)
+    local schema = nil
+
+    if getmetatable(space_or_schema) == nil then
+        schema = space_or_schema
+    else
+        schema = get_schema(space_or_schema)
+    end
 
     return schema_get_field_key(schema, path)
+end
+
+local function field_index(space, path)
+    local key = field_key(space, path)
+
+    for _, idx in pairs(space.index) do
+        local parts = idx.parts
+        if #parts == 1 and parts[1].fieldno == key then
+            return idx
+        end
+    end
+
+    return nil
 end
 
 local function create_index(space, index_name, orig_options)
@@ -493,10 +516,117 @@ local function create_index(space, index_name, orig_options)
 
 end
 
+local function op_to_tarantool(op_str)
+    if op_str == "==" then
+        return "EQ"
+    elseif op_str == "<" then
+        return "LT"
+    elseif op_str == "<=" then
+        return "LE"
+    elseif op_str == ">" then
+        return "GT"
+    elseif op_str == ">=" then
+        return "GE"
+    else
+        return nil
+    end
+end
+
+local function op_to_function(op_str)
+    if op_str == "==" then
+        return function(lhs, rhs) return lhs == rhs end
+    elseif op_str == "<" then
+        return function(lhs, rhs) return lhs < rhs end
+    elseif op_str == "<=" then
+        return function(lhs, rhs) return lhs <= rhs end
+    elseif op_str == ">" then
+        return function(lhs, rhs) return lhs > rhs end
+    elseif op_str == ">=" then
+        return function(lhs, rhs) return lhs >= rhs end
+    else
+        return nil
+    end
+end
+
+
+local function validate_condition(condition)
+    if #condition ~= 3 then
+        error("Malformed condition: " .. json.encode(condition))
+    end
+
+    if not startswith(condition[1], "$") then
+        error("Condition must start with field name ($my.field.name)")
+    end
+
+    if type(condition[3]) == "table" then
+         error("Condition must end with a regular value 1")
+    end
+
+    if type(condition[3]) == "string" and startswith(condition[3], "$") then
+        error("Condition must end with a regular value 2")
+    end
+
+    if op_to_tarantool(condition[2]) == nil then
+        error("Operation not supported: " .. condition[2])
+    end
+end
+
+local function document_select(space, query)
+    local schema = get_schema(space)
+
+    if #query == 0 then
+        error("Query must contain at least one condition")
+    end
+
+    local primary_condition = query[1]
+
+    validate_condition(primary_condition)
+
+    local primary_field = string.sub(primary_condition[1], 2, -1)
+
+    local index = field_index(space, primary_field)
+
+    local result = {}
+    local op = op_to_tarantool(primary_condition[2])
+
+    local checks = {}
+
+    for i=2,#query do
+        local condition = query[i]
+        validate_condition(condition)
+        local field = string.sub(condition[1], 2, -1)
+
+        table.insert(checks, {field_key(space, field),
+                              op_to_function(condition[2]),
+                              condition[3]})
+
+    end
+
+    for _, tuple in index:pairs(primary_condition[3], {iterator = op}) do
+        local matches = true
+
+        for _, check in ipairs(checks) do
+            local lhs = tuple[check[1]]
+            local rhs = check[3]
+            if not check[2](lhs, rhs) then
+                matches = false
+                break
+            end
+        end
+
+        if matches then
+            table.insert(result, unflatten(space, tuple))
+        end
+    end
+
+    return result
+end
+
 return {flatten = flatten,
         unflatten = unflatten,
         create_index = create_index,
         field_key = field_key,
         get_schema = get_schema,
         set_schema = set_schema,
-        extend_schema = extend_schema}
+        extend_schema = extend_schema,
+        select = document_select}
