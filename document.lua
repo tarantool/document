@@ -548,22 +548,66 @@ local function op_to_function(op_str)
     end
 end
 
+local function invert_op(op_str)
+    if op_str == "==" then
+        return "=="
+    elseif op_str == "<" then
+        return ">"
+    elseif op_str == "<=" then
+        return ">="
+    elseif op_str == ">" then
+        return "<"
+    elseif op_str == ">=" then
+        return "<="
+    else
+        return nil
+    end
+end
 
-local function validate_condition(condition)
+local function condition_type(condition)
+    local is_left = false
+    local is_right = false
+
+    if type(condition[1]) == "string" and startswith(condition[1], "$") then
+        is_left = true
+    end
+
+    if type(condition[3]) == "string" and startswith(condition[3], "$") then
+        is_right = true
+    end
+
+    if is_left and is_right then
+        return "both"
+    elseif is_left then
+        return "left"
+    elseif is_right then
+        return "right"
+    else
+        return nil
+    end
+end
+
+local function condition_get_index(space, condition)
+    local schema = get_schema(space)
+
+    if type(condition[1]) ~= "string" or not startswith(condition[1], "$") then
+        return nil
+    end
+
+    local field = string.sub(condition[1], 2, -1)
+
+    local index = field_index(space, field)
+
+    return index
+end
+
+local function validate_select_condition(condition)
     if #condition ~= 3 then
         error("Malformed condition: " .. json.encode(condition))
     end
 
-    if not startswith(condition[1], "$") then
-        error("Condition must start with field name ($my.field.name)")
-    end
-
-    if type(condition[3]) == "table" then
-         error("Condition must end with a regular value 1")
-    end
-
-    if type(condition[3]) == "string" and startswith(condition[3], "$") then
-        error("Condition must end with a regular value 2")
+    if condition_type(condition) ~= "left" then
+        error("Condition should have field name on the left and value on the right")
     end
 
     if op_to_tarantool(condition[2]) == nil then
@@ -571,38 +615,65 @@ local function validate_condition(condition)
     end
 end
 
+local function validate_join_condition(condition)
+    if #condition ~= 3 then
+        error("Malformed condition: " .. json.encode(condition))
+    end
+
+    if condition_type(condition) == nil then
+        error("Condition should have at least one field name")
+    end
+
+    if op_to_tarantool(condition[2]) == nil then
+        error("Operation not supported: " .. condition[2])
+    end
+end
+
+
 local function document_select(space, query)
     local schema = get_schema(space)
+    local skip = nil
+    local primary_value = nil
+    local op = "ALL"
+    local index = space.index.primary
 
     if #query == 0 then
         error("Query must contain at least one condition")
     end
 
-    local primary_condition = query[1]
+    for i=1,#query do
+        if condition_get_index(space, query[i]) ~= nil then
 
-    validate_condition(primary_condition)
+            local primary_condition = query[i]
 
-    local primary_field = string.sub(primary_condition[1], 2, -1)
+            validate_select_condition(primary_condition)
 
-    local index = field_index(space, primary_field)
+            local primary_field = string.sub(primary_condition[1], 2, -1)
 
-    local result = {}
-    local op = op_to_tarantool(primary_condition[2])
+            index = field_index(space, primary_field)
+            op = op_to_tarantool(primary_condition[2])
+            primary_value = primary_condition[3]
+            skip = i
+            break
+        end
+    end
 
     local checks = {}
 
-    for i=2,#query do
-        local condition = query[i]
-        validate_condition(condition)
-        local field = string.sub(condition[1], 2, -1)
+    for i=1,#query do
+        if i ~= skip then
+            local condition = query[i]
+            validate_select_condition(condition)
+            local field = string.sub(condition[1], 2, -1)
 
-        table.insert(checks, {field_key(space, field),
-                              op_to_function(condition[2]),
-                              condition[3]})
-
+            table.insert(checks, {field_key(space, field),
+                                  op_to_function(condition[2]),
+                                  condition[3]})
+        end
     end
 
-    for _, tuple in index:pairs(primary_condition[3], {iterator = op}) do
+    local result = {}
+    for _, tuple in index:pairs(primary_value, {iterator = op}) do
         local matches = true
 
         for _, check in ipairs(checks) do
@@ -620,6 +691,10 @@ local function document_select(space, query)
     end
 
     return result
+end
+
+local function document_join(space1, space2, query)
+
 end
 
 return {flatten = flatten,
