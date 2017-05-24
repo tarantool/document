@@ -630,16 +630,14 @@ local function validate_join_condition(condition)
 end
 
 
-local function document_select(space, query)
+local function tuple_select(space, query)
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
     local op = "ALL"
     local index = space.index.primary
 
-    if #query == 0 then
-        error("Query must contain at least one condition")
-    end
+    query = query or {}
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
@@ -676,11 +674,11 @@ local function document_select(space, query)
 
     local fun, param, state = index:pairs(primary_value, {iterator = op})
 
-    local function gen(param, state)
+    local function gen()
+        local val = nil
+        state, val = fun(param, state)
 
-        local new_state, val = fun(param, state)
-
-        while new_state ~= nil do
+        while state ~= nil do
             local matches = true
 
             for _, check in ipairs(checks) do
@@ -693,35 +691,123 @@ local function document_select(space, query)
             end
 
             if matches then
-                local res = unflatten(space, val)
-                return new_state, res
+                return val
             end
 
-            new_state, val = fun(param, new_state)
+            state, val = fun(param, state)
         end
 
         return nil
     end
 
-    return gen, param, state
+    return gen
 end
 
-local function document_join(space1, space2, query)
+local function document_select(space, query)
+    local fun = tuple_select(space, query)
+
+    local function gen()
+        return unflatten(space, fun())
+    end
+
+    return gen
+end
+
+local function tuple_join(space1, space2, query)
     local left = {}
     local right = {}
     local both = {}
 
     for _, condition in ipairs(query) do
+        validate_join_condition(condition)
+
         if condition_type(condition) == "left" then
             table.insert(left, condition)
         elseif condition_type(condition) == "right" then
-            table.insert(right, condition)
+            table.insert(right, {condition[3],
+                                 invert_op(condition[2]),
+                                 condition[1]})
         elseif condition_type(condition) == "both" then
-            table.insert(both, condition)
+            table.insert(both, {condition[3],
+                                invert_op(condition[2]),
+                                condition[1]})
         end
     end
 
+    for _, condition in ipairs(right) do
+        table.insert(both, condition)
+    end
 
+
+    local plan = {}
+    local checks = {}
+
+    for _, check in ipairs(both) do
+        if type(check[3]) == "string" and startswith(check[3], "$") then
+            local field = string.sub(check[3], 2, -1)
+            local key = field_key(space1, field)
+
+            table.insert(plan, {true, key})
+            table.insert(checks, {check[1], check[2], nil})
+        else
+            table.insert(plan, {false})
+            table.insert(checks, {check[1], check[2], check[3]})
+        end
+    end
+
+    local left_iter = tuple_select(space1, left)
+    local right_iter = nil
+    local left_val = nil
+
+    local function gen()
+        while true do
+            if right_iter == nil then
+                left_val = left_iter()
+
+                if left_val == nil then
+                    return nil
+                end
+
+                for i, p in ipairs(plan) do
+                    if p[1] then
+                        checks[i][3] = left_val[p[2]]
+                    end
+                end
+
+                right_iter = tuple_select(space2, checks)
+            else
+                local right_val = right_iter()
+
+                if right_val == nil then
+                    right_iter = nil
+                else
+                    return {left_val, right_val}
+                end
+            end
+        end
+    end
+
+    return gen
+end
+
+local function document_join(space1, space2, query)
+    local fun = tuple_join(space1, space2, query)
+
+    local function gen()
+        local res = fun()
+
+        if res == nil then
+            return nil
+        end
+
+        local tuple1 = res[1]
+        local tuple2 = res[2]
+
+        return {unflatten(space1, tuple1),
+                unflatten(space2, tuple2)}
+    end
+
+    return gen
 end
 
 return {flatten = flatten,
