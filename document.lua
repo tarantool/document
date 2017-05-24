@@ -673,27 +673,54 @@ local function document_select(space, query)
     end
 
     local result = {}
-    for _, tuple in index:pairs(primary_value, {iterator = op}) do
-        local matches = true
 
-        for _, check in ipairs(checks) do
-            local lhs = tuple[check[1]]
-            local rhs = check[3]
-            if not check[2](lhs, rhs) then
-                matches = false
-                break
+    local fun, param, state = index:pairs(primary_value, {iterator = op})
+
+    local function gen(param, state)
+
+        local new_state, val = fun(param, state)
+
+        while new_state ~= nil do
+            local matches = true
+
+            for _, check in ipairs(checks) do
+                local lhs = val[check[1]]
+                local rhs = check[3]
+                if not check[2](lhs, rhs) then
+                    matches = false
+                    break
+                end
             end
+
+            if matches then
+                local res = unflatten(space, val)
+                return new_state, res
+            end
+
+            new_state, val = fun(param, new_state)
         end
 
-        if matches then
-            table.insert(result, unflatten(space, tuple))
-        end
+        return nil
     end
 
-    return result
+    return gen, param, state
 end
 
 local function document_join(space1, space2, query)
+    local left = {}
+    local right = {}
+    local both = {}
+
+    for _, condition in ipairs(query) do
+        if condition_type(condition) == "left" then
+            table.insert(left, condition)
+        elseif condition_type(condition) == "right" then
+            table.insert(right, condition)
+        elseif condition_type(condition) == "both" then
+            table.insert(both, condition)
+        end
+    end
+
 
 end
 
@@ -704,4 +731,5 @@ return {flatten = flatten,
         get_schema = get_schema,
         set_schema = set_schema,
         extend_schema = extend_schema,
-        select = document_select}
+        select = document_select,
+        join = document_join}
