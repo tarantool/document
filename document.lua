@@ -630,14 +630,24 @@ local function validate_join_condition(condition)
 end
 
 
-local function tuple_select(space, query)
+local function tuple_select(space, query, fields)
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
     local op = "ALL"
     local index = space.index.primary
+    local field_ids = nil
 
     query = query or {}
+
+    if fields ~= nil then
+        field_ids = {}
+
+        for _,field in ipairs(fields) do
+            local key = field_key(space, field)
+            field_ids[key] = true
+        end
+    end
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
@@ -691,7 +701,19 @@ local function tuple_select(space, query)
             end
 
             if matches then
-                return val
+                if field_ids then
+                    local sparse_val = {}
+
+                    for i, v in ipairs(val) do
+                        if field_ids[i] then
+                            sparse_val[i] = v
+                        end
+                    end
+
+                    return sparse_val
+                else
+                    return val
+                end
             end
 
             state, val = fun(param, state)
@@ -703,8 +725,8 @@ local function tuple_select(space, query)
     return gen
 end
 
-local function document_select(space, query)
-    local fun = tuple_select(space, query)
+local function document_select(space, query, fields)
+    local fun = tuple_select(space, query, fields)
 
     local function gen()
         return unflatten(space, fun())
