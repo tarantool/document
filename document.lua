@@ -2,6 +2,7 @@
 
 local math = require('math')
 local json = require('json')
+local yaml = require 'yaml'
 
 local MAX_REMOTE_CONNS_TO_CACHE = 100
 
@@ -630,24 +631,38 @@ local function validate_join_condition(condition)
 end
 
 
-local function tuple_select(space, query, fields)
+local function take_batch(it, batch_size)
+    local res = {}
+
+    for i=1,batch_size do
+        local val = it()
+        if val == nil then
+            return res
+        end
+        res[i] = val
+    end
+
+    return res
+end
+
+local function space_type(space)
+    if space.connection ~= nil then
+        return "net.box"
+    elseif space.q_insert ~= nil then
+        return "shard"
+    else
+        return "space"
+    end
+end
+
+local function local_tuple_select(space, query)
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
     local op = "ALL"
     local index = space.index.primary
-    local field_ids = nil
 
     query = query or {}
-
-    if fields ~= nil then
-        field_ids = {}
-
-        for _,field in ipairs(fields) do
-            local key = field_key(space, field)
-            field_ids[key] = true
-        end
-    end
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
@@ -701,19 +716,7 @@ local function tuple_select(space, query, fields)
             end
 
             if matches then
-                if field_ids then
-                    local sparse_val = {}
-
-                    for i, v in ipairs(val) do
-                        if field_ids[i] then
-                            sparse_val[i] = v
-                        end
-                    end
-
-                    return sparse_val
-                else
-                    return val
-                end
+                return val
             end
 
             state, val = fun(param, state)
@@ -725,14 +728,177 @@ local function tuple_select(space, query, fields)
     return gen
 end
 
-local function document_select(space, query, fields)
-    local fun = tuple_select(space, query, fields)
+local function remote_tuple_select(space, query, batch_size)
+    local schema = get_schema(space)
+    local skip = nil
+    local primary_value = nil
+    local op = "ALL"
+    local index = space.index.primary
+
+    query = query or {}
+
+    for i=1,#query do
+        if condition_get_index(space, query[i]) ~= nil then
+
+            local primary_condition = query[i]
+
+            validate_select_condition(primary_condition)
+
+            local primary_field = string.sub(primary_condition[1], 2, -1)
+
+            index = field_index(space, primary_field)
+            op = op_to_tarantool(primary_condition[2])
+            primary_value = primary_condition[3]
+            skip = i
+            break
+        end
+    end
+
+    local checks = {}
+
+    for i=1,#query do
+        if i ~= skip then
+            local condition = query[i]
+            validate_select_condition(condition)
+            local field = string.sub(condition[1], 2, -1)
+
+            table.insert(checks, {field_key(space, field),
+                                  op_to_function(condition[2]),
+                                  condition[3]})
+        end
+    end
+
+    local result = {}
+
+    local batch = {}
+    local tuple_no = 0
+    local offset = 0
+    local fun, param, state = index:pairs(primary_value, {iterator = op})
+
+    local function gen()
+        local val = nil
+        state, val = fun(param, state)
+
+        while state ~= nil do
+            local matches = true
+
+            for _, check in ipairs(checks) do
+                local lhs = val[check[1]]
+                local rhs = check[3]
+                if not check[2](lhs, rhs) then
+                    matches = false
+                    break
+                end
+            end
+
+            if matches then
+                return val
+            end
+
+            state, val = fun(param, state)
+        end
+
+        return nil
+    end
+
+    return gen
+end
+
+
+function _document_remote_tuple_select(space_name, query, cursor)
+    print('rs: ', space_name, json.encode(query))
+    local space = box.space[space_name]
+
+    return remote_tuple_select(space, query, cursor)
+end
+
+local function local_document_select(space, query)
+    local fun = local_tuple_select(space, query)
 
     local function gen()
         return unflatten(space, fun())
     end
 
     return gen
+end
+
+local function tuple_select(space, query)
+    if space_type(space) == "space" then
+        return local_tuple_select(space, query)
+    else
+        print('ts: ', json.encode(query))
+        local conn = space.connection
+        local space_name = space.name
+        local res = nil
+        local cursor = nil
+
+        res, cursor = conn:call('_document_remote_tuple_select',
+                                {space_name, query, cursor})
+
+        local function gen()
+
+        end
+
+        return res
+    end
+end
+
+local function document_select(space, query)
+    return local_document_select(space, query)
+end
+
+local function local_batch_tuple_select(space, queries)
+    local result = {}
+
+    for i, query in ipairs(queries) do
+        local it = local_tuple_select(space, query)
+        local r = {}
+
+        for value in it do
+            table.insert(r, value)
+        end
+        result[i] = r
+    end
+
+    return result
+end
+
+
+local function _document_remote_batch_tuple_select(space_name, queries)
+    local space = box.space[space_name]
+
+    return local_batch_tuple_select(space, queries)
+end
+
+local function local_batch_document_select(space, queries)
+    local result = {}
+
+    for _, query in ipairs(queries) do
+        local iter = local_document_select(space, query)
+        table.insert(result, iter)
+    end
+
+    return result
+end
+
+local function batch_tuple_select(space, queries)
+    if space_type(space) == "space" then
+        return local_batch_tuple_select(space, queries)
+    else
+        print('bs')
+        local conn = space.connection
+        local space_name = space.name
+        return conn:call('_document_remote_batch_tuple_select',
+                         {space_name, queries})
+    end
+end
+
+local function batch_document_select(space, queries)
+    return local_batch_document_select(space, queries)
+end
+
+local function get_underlying_spaces(space)
+    return {space}
 end
 
 local function tuple_join(space1, space2, query)
@@ -812,7 +978,179 @@ local function tuple_join(space1, space2, query)
     return gen
 end
 
-local function document_join(space1, space2, query)
+local function remote_document_join(space1, space2, query, options)
+    local state = nil
+    local res = nil
+
+    local batch_size = 2
+
+    local left_spaces = get_underlying_spaces(space1)
+    local right_spaces = get_underlying_spaces(space2)
+    local left_space_no = 0
+    local right_space_no = 0
+    local left_space = nil
+    local right_space = nil
+
+    local left_space_iterator = nil
+
+    local batch = nil
+
+    local select_next_left_space = nil
+    local get_left_space_iterator = nil
+    local select_next_left_batch = nil
+    local select_next_right_space = nil
+    local compile_checks = nil
+    local select_tuples = nil
+
+    local tuples = nil
+    local group_no = 0
+    local tuple_no = 0
+
+    local left_query = {}
+    local right_query = {}
+
+    local compiled_query = {}
+
+    for _, condition in ipairs(query) do
+        validate_join_condition(condition)
+
+        if condition_type(condition) == "left" then
+            table.insert(left_query, condition)
+        else
+            table.insert(right_query, {condition[3],
+                                       invert_op(condition[2]),
+                                       condition[1]})
+        end
+    end
+
+    select_next_left_space = function()
+        left_space_no = left_space_no + 1
+        left_space = left_spaces[left_space_no]
+        if left_space == nil then
+            return nil
+        end
+
+        return select_left_space_iterator
+    end
+
+    select_left_space_iterator = function()
+        left_space_iterator = tuple_select(left_space, left_query)
+
+        if left_space_iterator == nil then
+            return nil
+        end
+
+        return select_next_left_batch
+    end
+
+    select_next_left_batch = function()
+        if left_space_iterator == nil then
+            return select_next_left_space
+        end
+
+        batch = take_batch(left_space_iterator, batch_size)
+
+        if #batch < batch_size then
+            left_space_iterator = nil
+        end
+
+        if #batch == 0 then
+            return select_next_left_space
+        end
+
+        right_space_no = 0
+        return select_next_right_space
+    end
+
+    select_next_right_space = function()
+        right_space_no = right_space_no + 1
+        right_space = right_spaces[right_space_no]
+        if right_space == nil then
+            return select_next_left_batch
+        end
+
+        return compile_checks
+    end
+
+    compile_checks = function()
+        compiled_query = {}
+        for i, tuple in ipairs(batch) do
+            checks = {}
+            compiled_query[i] = checks
+
+            for j, condition in ipairs(right_query) do
+                if type(condition[3]) == "string" and startswith(condition[3], "$") then
+                    local field = string.sub(condition[3], 2, -1)
+                    local key = field_key(right_space, field)
+
+                    checks[j] = {condition[1], condition[2], tuple[key]}
+                else
+                    checks[j] = condition
+                end
+            end
+        end
+
+        return select_tuples
+    end
+
+    select_tuples = function()
+        group_no = 1
+        tuple_no = 0
+        tuples = batch_tuple_select(right_space, compiled_query)
+
+        if #tuples == 0 then
+            return select_next_right_space
+        end
+
+        return select_next_tuple
+    end
+
+    select_next_tuple = function()
+        local tuple = nil
+
+        local group = tuples[group_no]
+
+        if group == nil then
+            return select_next_right_space
+        end
+
+        tuple_no = tuple_no + 1
+
+        local tuple = group[tuple_no]
+
+        if tuple == nil then
+            group_no = group_no + 1
+            tuple_no = 0
+            return select_next_tuple
+        end
+
+        local left = doc.unflatten(left_space, batch[group_no])
+        local right = doc.unflatten(right_space, tuple)
+
+        return select_next_tuple, {left, right}
+    end
+
+    state = select_next_left_space
+
+    local function gen()
+        while true do
+            state, res = state()
+
+            if state == nil then
+                return nil
+            end
+
+            if res ~= nil then
+                return res
+            end
+        end
+    end
+
+    return gen
+end
+
+
+local function local_document_join(space1, space2, query)
     local fun = tuple_join(space1, space2, query)
 
     local function gen()
@@ -832,6 +1170,14 @@ local function document_join(space1, space2, query)
     return gen
 end
 
+local function document_join(space1, space2, query)
+    if space_type(space1) == "space" and space_type(space2) == "space" then
+        return local_document_join(space1, space2, query)
+    else
+        return remote_document_join(space1, space2, query)
+    end
+end
+
 return {flatten = flatten,
         unflatten = unflatten,
         create_index = create_index,
@@ -840,4 +1186,5 @@ return {flatten = flatten,
         set_schema = set_schema,
         extend_schema = extend_schema,
         select = document_select,
+        batch_select = batch_document_select,
         join = document_join}
