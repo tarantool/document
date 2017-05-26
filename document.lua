@@ -754,62 +754,162 @@ local function remote_tuple_select(space, query, batch_size)
         end
     end
 
+    local primary_field_no = index.parts[1].fieldno
+    local pk_field_no = space.index.primary.parts[1].fieldno
+
     local checks = {}
 
     for i=1,#query do
-        if i ~= skip then
-            local condition = query[i]
-            validate_select_condition(condition)
-            local field = string.sub(condition[1], 2, -1)
+        local condition = query[i]
+        validate_select_condition(condition)
+        local field = string.sub(condition[1], 2, -1)
 
-            table.insert(checks, {field_key(space, field),
-                                  op_to_function(condition[2]),
-                                  condition[3]})
-        end
+        table.insert(checks, {field_key(space, field),
+                              op_to_function(condition[2]),
+                              condition[3]})
     end
 
     local result = {}
 
-    local batch = {}
-    local tuple_no = 0
-    local offset = 0
-    local fun, param, state = index:pairs(primary_value, {iterator = op})
+    local last_value = nil
+    local processed_primary_keys = {}
 
     local function gen()
-        local val = nil
-        state, val = fun(param, state)
+        local batch = {}
+        local value = primary_value
+        local opts = {iterator = op}
 
-        while state ~= nil do
-            local matches = true
+        if last_value ~= nil then
+            value = last_value
+            opts = {iterator = 'GE'}
+        end
 
-            for _, check in ipairs(checks) do
-                local lhs = val[check[1]]
-                local rhs = check[3]
-                if not check[2](lhs, rhs) then
-                    matches = false
-                    break
+        for _, val in index:pairs(value, opts) do
+            local new_value = val[primary_field_no]
+            local pk = val[pk_field_no]
+
+            if not processed_primary_keys[pk] then
+                local matches = true
+
+                for _, check in ipairs(checks) do
+                    local lhs = val[check[1]]
+                    local rhs = check[3]
+                    if not check[2](lhs, rhs) then
+                        matches = false
+                        break
+                    end
+                end
+
+                if matches then
+                    table.insert(batch, val)
                 end
             end
 
-            if matches then
-                return val
+            if last_value == new_value then
+                processed_primary_keys[pk] = true
+            else
+                processed_primary_keys = {}
+                last_value = new_value
             end
 
-            state, val = fun(param, state)
+            if #batch >= batch_size then
+                break
+            end
         end
 
-        return nil
+        if #batch == 0 then
+            return nil
+        end
+
+        return batch
     end
 
     return gen
 end
 
+local cursor_cache = {}
 
-function _document_remote_tuple_select(space_name, query, cursor)
-    print('rs: ', space_name, json.encode(query))
+local function get_cursor(id)
+    if id == nil then
+        local cursor_id = #cursor_cache
+
+        for i, cursor in pairs(cursor_cache) do
+            if cursor == nil then
+                cursor_id = i
+                break
+            end
+        end
+
+        local cursor = {}
+        cursor_cache[cursor_id] = cursor
+        return cursor
+    else
+        return cursor_cache[id]
+    end
+end
+
+local function free_cursor(id)
+    cursor_cache[id] = nil
+end
+
+function _document_remote_tuple_select(space_name, query, batch_size, cursor_id)
     local space = box.space[space_name]
 
-    return remote_tuple_select(space, query, cursor)
+    local cursor = get_cursor(cursor_id)
+    if cursor.gen == nil then
+        cursor.gen = remote_tuple_select(space, query, batch_size)
+    end
+    local gen = cursor.gen
+
+    local batch = gen()
+
+    if #batch == 0 then
+        free_cursor(cursor_id)
+        return {nil, nil}
+    end
+
+    return {batch, cursor_id}
+end
+
+local function remote_tuple_select(space, query, batch_size)
+    local conn = space.connection
+    local space_name = space.name
+    local batch = nil
+    local cursor = nil
+    local tuple_no = 0
+
+    local ret = conn:call('_document_remote_tuple_select',
+                          {space_name, query, batch_size, nil})
+    batch = ret[1]
+    cursor = ret[2]
+
+    local function gen()
+        while true do
+            if batch == nil then
+                return nil
+            end
+
+            tuple_no = tuple_no + 1
+
+            local tuple = batch[tuple_no]
+
+            if tuple ~= nil then
+                return tuple
+            end
+
+            if cursor ~= nil then
+                ret = conn:call('_document_remote_tuple_select',
+                                {space_name, query, batch_size, cursor})
+                batch = ret[1]
+                cursor = ret[2]
+                tuple_no = 0
+            else
+                return nil
+            end
+        end
+    end
+
+    return gen
 end
 
 local function local_document_select(space, query)
@@ -826,20 +926,7 @@ local function tuple_select(space, query)
     if space_type(space) == "space" then
         return local_tuple_select(space, query)
     else
-        print('ts: ', json.encode(query))
-        local conn = space.connection
-        local space_name = space.name
-        local res = nil
-        local cursor = nil
-
-        res, cursor = conn:call('_document_remote_tuple_select',
-                                {space_name, query, cursor})
-
-        local function gen()
-
-        end
-
-        return res
+        return remote_tuple_select(space, query, 10)
     end
 end
 
@@ -864,7 +951,7 @@ local function local_batch_tuple_select(space, queries)
 end
 
 
-local function _document_remote_batch_tuple_select(space_name, queries)
+function _document_remote_batch_tuple_select(space_name, queries)
     local space = box.space[space_name]
 
     return local_batch_tuple_select(space, queries)
@@ -885,7 +972,6 @@ local function batch_tuple_select(space, queries)
     if space_type(space) == "space" then
         return local_batch_tuple_select(space, queries)
     else
-        print('bs')
         local conn = space.connection
         local space_name = space.name
         return conn:call('_document_remote_batch_tuple_select',
