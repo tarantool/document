@@ -3,6 +3,7 @@
 local math = require('math')
 local json = require('json')
 local yaml = require 'yaml'
+local shard = require 'shard'
 
 local MAX_REMOTE_CONNS_TO_CACHE = 100
 
@@ -849,6 +850,9 @@ local function get_cursor(id)
 end
 
 local function free_cursor(id)
+    if id == nil then
+        return
+    end
     cursor_cache[id] = nil
 end
 
@@ -863,7 +867,7 @@ function _document_remote_tuple_select(space_name, query, batch_size, cursor_id)
 
     local batch = gen()
 
-    if #batch == 0 then
+    if batch == nil or #batch == 0 then
         free_cursor(cursor_id)
         return {nil, nil}
     end
@@ -957,17 +961,6 @@ function _document_remote_batch_tuple_select(space_name, queries)
     return local_batch_tuple_select(space, queries)
 end
 
-local function local_batch_document_select(space, queries)
-    local result = {}
-
-    for _, query in ipairs(queries) do
-        local iter = local_document_select(space, query)
-        table.insert(result, iter)
-    end
-
-    return result
-end
-
 local function batch_tuple_select(space, queries)
     if space_type(space) == "space" then
         return local_batch_tuple_select(space, queries)
@@ -979,12 +972,18 @@ local function batch_tuple_select(space, queries)
     end
 end
 
-local function batch_document_select(space, queries)
-    return local_batch_document_select(space, queries)
-end
-
 local function get_underlying_spaces(space)
-    return {space}
+    if space_type(space) == "shard" then
+        local spaces = {}
+
+        for _, zone in pairs(shard.shards) do
+            local space = zone[1].conn.space[space.name]
+            table.insert(spaces, space)
+        end
+        return spaces
+    else
+        return {space}
+    end
 end
 
 local function tuple_join(space1, space2, query)
@@ -1210,8 +1209,8 @@ local function remote_document_join(space1, space2, query, options)
             return select_next_tuple
         end
 
-        local left = doc.unflatten(left_space, batch[group_no])
-        local right = doc.unflatten(right_space, tuple)
+        local left = unflatten(left_space, batch[group_no])
+        local right = unflatten(right_space, tuple)
 
         return select_next_tuple, {left, right}
     end
@@ -1272,5 +1271,4 @@ return {flatten = flatten,
         set_schema = set_schema,
         extend_schema = extend_schema,
         select = document_select,
-        batch_select = batch_document_select,
         join = document_join}
