@@ -436,6 +436,23 @@ local function schema_add_path(schema, path, path_type)
     return root
 end
 
+local function document_get_field_by_path(doc, path)
+    local path_dict = split(path, ".")
+
+    for k, v in ipairs(path_dict) do
+        doc = doc[v]
+        if doc == nil then
+            return nil
+        end
+    end
+
+    if type(doc) == "table" then
+        return nil
+    end
+
+    return doc
+end
+
 local function schema_get_field_key(schema, path)
     local path_dict = split(path, ".")
 
@@ -653,6 +670,108 @@ local function space_type(space)
         return "shard"
     else
         return "space"
+    end
+end
+
+local function get_underlying_spaces(space)
+    if space_type(space) == "shard" then
+        local spaces = {}
+
+        for _, zone in pairs(shard.shards) do
+            local space = zone[1].conn.space[space.name]
+            table.insert(spaces, space)
+        end
+        return spaces
+    else
+        return {space}
+    end
+end
+
+local function space_get_primary_key(space)
+    local idx = space.index.primary
+    local key = idx.parts[1]
+
+    return key
+end
+
+local function shard_get_primary_key_path(candidate_space)
+    local space = nil
+
+    for _, zone in pairs(shard.shards) do
+        space = zone[1].conn.space[candidate_space.name]
+        break
+    end
+
+    local idx = space.index.primary
+    local key = idx.parts[1].fieldno
+
+    local format = space:format()
+
+    local key_fmt = format[key]
+
+    for name, _ in pairs(key_fmt) do
+        return name
+    end
+
+    return nil
+end
+
+local function local_document_insert(space, value)
+    local flat = flatten(space, value)
+    space:replace(space, flat)
+end
+
+local function net_box_document_insert(space, value)
+    local flat = flatten(space, value)
+    space:replace(space, flat)
+end
+
+local function shard_document_insert(space, value)
+    if space == nil then
+        error("space should not be nil")
+    end
+
+    local space_name = space.name
+
+    if value == nil then
+        error("value should not be nil")
+    end
+
+    local primary_key_path = shard_get_primary_key_path(space)
+
+    local shard_key = document_get_field_by_path(value, primary_key_path)
+
+    if shard_key == nil then
+        error("doc should have " .. shard_key_name)
+    end
+
+    local nodes = shard.shard(shard_key)
+    local node = nodes[1]
+
+    local function ins(space_obj)
+        if getmetatable(space_obj) == nil then
+            error("space is not net.box space")
+        end
+
+        local flat = flatten(space_obj, value)
+
+        if flat == nil then
+            error("Failed to flatten trade")
+        end
+
+        space_obj:replace(flat)
+    end
+
+    shard:space_call(space_name, node, ins)
+end
+
+local function document_insert(space, value)
+    if space_type(space) == "space" then
+        return local_document_insert(space, value)
+    elseif space_type(space) == "net.box" then
+        return net_box_document_insert(space, value)
+    else
+        return shard_document_insert(space, value)
     end
 end
 
@@ -934,9 +1053,110 @@ local function tuple_select(space, query)
     end
 end
 
-local function document_select(space, query)
-    return local_document_select(space, query)
+local function remote_document_select(candidate_space, query, options)
+    local state = nil
+    local res = nil
+
+    if options == nil then
+        options = {batch_size=1024, limit=1000}
+    end
+
+    local batch_size = options.batch_size
+
+    local spaces = get_underlying_spaces(candidate_space)
+    local space_no = 0
+    local space = nil
+
+    local space_iterator = nil
+    local batch = nil
+
+    local tuple_no = 0
+
+    local select_next_space = nil
+    local get_space_iterator = nil
+    local select_next_batch = nil
+    local select_next_tuple = nil
+
+    select_next_space = function()
+        space_no = space_no + 1
+        space = spaces[space_no]
+        if space == nil then
+            return nil
+        end
+
+        return select_space_iterator
+    end
+
+    select_space_iterator = function()
+        space_iterator = tuple_select(space, query)
+
+        if space_iterator == nil then
+            return nil
+        end
+
+        return select_next_batch
+    end
+
+    select_next_batch = function()
+        if space_iterator == nil then
+            return select_next_space
+        end
+
+        batch = take_batch(space_iterator, batch_size)
+
+        if #batch < batch_size then
+            space_iterator = nil
+        end
+
+        if #batch == 0 then
+            return select_next_space
+        end
+
+        tuple_no = 0
+        return select_next_tuple
+    end
+
+    select_next_tuple = function()
+        tuple_no = tuple_no + 1
+
+        local tuple = batch[tuple_no]
+
+        if tuple == nil then
+            return select_next_batch
+        end
+
+        local res = unflatten(space, tuple)
+
+        return select_next_tuple, res
+    end
+
+    state = select_next_space
+
+    local function gen()
+        while true do
+            state, res = state()
+
+            if state == nil then
+                return nil
+            end
+
+            if res ~= nil then
+                return res
+            end
+        end
+    end
+
+    return gen
 end
+
+local function document_select(space, query)
+    if space_type(space) == "space" then
+        return local_document_select(space, query)
+    else
+        return remote_document_select(space, query)
+    end
+end
+
 
 local function local_batch_tuple_select(space, queries)
     local result = {}
@@ -954,7 +1174,6 @@ local function local_batch_tuple_select(space, queries)
     return result
 end
 
-
 function _document_remote_batch_tuple_select(space_name, queries)
     local space = box.space[space_name]
 
@@ -969,20 +1188,6 @@ local function batch_tuple_select(space, queries)
         local space_name = space.name
         return conn:call('_document_remote_batch_tuple_select',
                          {space_name, queries})
-    end
-end
-
-local function get_underlying_spaces(space)
-    if space_type(space) == "shard" then
-        local spaces = {}
-
-        for _, zone in pairs(shard.shards) do
-            local space = zone[1].conn.space[space.name]
-            table.insert(spaces, space)
-        end
-        return spaces
-    else
-        return {space}
     end
 end
 
@@ -1067,7 +1272,11 @@ local function remote_document_join(space1, space2, query, options)
     local state = nil
     local res = nil
 
-    local batch_size = 2
+    if options == nil then
+        options = {batch_size=1024, limit=1000}
+    end
+
+    local batch_size = options.batch_size
 
     local left_spaces = get_underlying_spaces(space1)
     local right_spaces = get_underlying_spaces(space2)
@@ -1086,6 +1295,7 @@ local function remote_document_join(space1, space2, query, options)
     local select_next_right_space = nil
     local compile_checks = nil
     local select_tuples = nil
+    local select_next_tuple = nil
 
     local tuples = nil
     local group_no = 0
@@ -1270,5 +1480,6 @@ return {flatten = flatten,
         get_schema = get_schema,
         set_schema = set_schema,
         extend_schema = extend_schema,
+        insert = document_insert,
         select = document_select,
         join = document_join}
