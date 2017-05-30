@@ -33,12 +33,12 @@ Actual data manipulation
     doc.insert(box.space.test, {id=2, foo="bar", bar={baz=0}})
 
     print('All tuples')
-    for r in doc.select(shard.test) do
+    for r in doc.select(box.space.test) do
         print('tuple:', json.encode(r))
     end
 
     print('Tuples where bar.baz > 0')
-    for r in doc.select(shard.test, {{'$bar.baz', '>', 0}}) do
+    for r in doc.select(box.space.test, {{'$bar.baz', '>', 0}}) do
         print('tuple:', json.encode(r))
     end
 
