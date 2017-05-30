@@ -18,33 +18,36 @@ from external world. It has a few important strengths:
 
 Boilerplate:
 
-    doc = require('document')
-    json = require('json')
+```lua
+doc = require('document')
+json = require('json')
 
-    box.cfg{}
+box.cfg{}
 
-    box.schema.create_space('test', {if_not_exists = true})
-    doc.create_index(box.space.test, 'primary',
-                     {parts={'id', 'unsigned'}, if_not_exists=true})
+box.schema.create_space('test', {if_not_exists = true})
+doc.create_index(box.space.test, 'primary',
+                 {parts={'id', 'unsigned'}, if_not_exists=true})
+```
 
 Actual data manipulation
 
-    doc.insert(box.space.test, {id=1, foo="foo", bar={baz=3}})
-    doc.insert(box.space.test, {id=2, foo="bar", bar={baz=0}})
+```lua
+doc.insert(box.space.test, {id=1, foo="foo", bar={baz=3}})
+doc.insert(box.space.test, {id=2, foo="bar", bar={baz=0}})
 
-    print('All tuples')
-    for r in doc.select(box.space.test) do
-        print('tuple:', json.encode(r))
-    end
+print('All tuples')
+for r in doc.select(box.space.test) do
+    print('tuple:', json.encode(r))
+end
 
-    print('Tuples where bar.baz > 0')
-    for r in doc.select(box.space.test, {{'$bar.baz', '>', 0}}) do
-        print('tuple:', json.encode(r))
-    end
+print('Tuples where bar.baz > 0')
+for r in doc.select(box.space.test, {{'$bar.baz', '>', 0}}) do
+    print('tuple:', json.encode(r))
+end
 
-    print('Deleting a tuple where primary key == 2')
-    doc.delete(box.space.test, {{"$id", "==", 2}})
-
+print('Deleting a tuple where primary key == 2')
+doc.delete(box.space.test, {{"$id", "==", 2}})
+```
 
 ## How it works
 
