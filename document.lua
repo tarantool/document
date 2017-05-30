@@ -718,12 +718,12 @@ end
 
 local function local_document_insert(space, value)
     local flat = flatten(space, value)
-    space:replace(space, flat)
+    space:replace(flat)
 end
 
 local function net_box_document_insert(space, value)
     local flat = flatten(space, value)
-    space:replace(space, flat)
+    space:replace(flat)
 end
 
 local function shard_document_insert(space, value)
@@ -782,7 +782,9 @@ local function local_tuple_select(space, query)
     local op = "ALL"
     local index = space.index.primary
 
-    query = query or {}
+    if query == nil then
+        query = {}
+    end
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
@@ -855,7 +857,9 @@ local function remote_tuple_select(space, query, batch_size)
     local op = "ALL"
     local index = space.index.primary
 
-    query = query or {}
+    if query == nil then
+        query = {}
+    end
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
@@ -1191,6 +1195,84 @@ local function batch_tuple_select(space, queries)
     end
 end
 
+local function local_document_delete(space, query)
+    local schema = get_schema(space)
+    local skip = nil
+    local primary_value = nil
+    local op = "ALL"
+    local index = space.index.primary
+
+    if query == nil then
+        query = {}
+    end
+
+    for i=1,#query do
+        if condition_get_index(space, query[i]) ~= nil then
+
+            local primary_condition = query[i]
+
+            validate_select_condition(primary_condition)
+
+            local primary_field = string.sub(primary_condition[1], 2, -1)
+
+            index = field_index(space, primary_field)
+            op = op_to_tarantool(primary_condition[2])
+            primary_value = primary_condition[3]
+            skip = i
+            break
+        end
+    end
+
+    local pk_field_no = space.index.primary.parts[1].fieldno
+    local checks = {}
+
+    for i=1,#query do
+        if i ~= skip then
+            local condition = query[i]
+            validate_select_condition(condition)
+            local field = string.sub(condition[1], 2, -1)
+
+            table.insert(checks, {field_key(space, field),
+                                  op_to_function(condition[2]),
+                                  condition[3]})
+        end
+    end
+
+    local result = {}
+
+    for _, val in index:pairs(primary_value, {iterator = op}) do
+        local pk = val[pk_field_no]
+        space:delete(pk)
+    end
+end
+
+function _document_remote_document_delete(space_name, query)
+    local space = box.space[space_name]
+
+    return local_document_delete(space, query)
+end
+
+local function remote_document_delete(candidate_space, query)
+    local spaces = get_underlying_spaces(candidate_space)
+
+    for _, space in ipairs(spaces) do
+        local conn = space.connection
+        local space_name = space.name
+
+        local ret = conn:call('_document_remote_document_delete',
+                              {space_name, query})
+    end
+end
+
+local function document_delete(space, query)
+    if space_type(space) == "space" then
+        return local_document_delete(space, query)
+    else
+        return remote_document_delete(space, query)
+    end
+end
+
+
 local function tuple_join(space1, space2, query)
     local left = {}
     local right = {}
@@ -1482,4 +1564,5 @@ return {flatten = flatten,
         extend_schema = extend_schema,
         insert = document_insert,
         select = document_select,
+        delete = document_delete,
         join = document_join}
