@@ -775,7 +775,9 @@ local function document_insert(space, value)
     end
 end
 
-local function local_tuple_select(space, query)
+local function local_tuple_select(space, query, options)
+    options = options or {}
+    local limit = options.limit
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
@@ -820,6 +822,7 @@ local function local_tuple_select(space, query)
     local result = {}
 
     local fun, param, state = index:pairs(primary_value, {iterator = op})
+    local count = 0
 
     local function gen()
         local val = nil
@@ -838,6 +841,11 @@ local function local_tuple_select(space, query)
             end
 
             if matches then
+                count = count + 1
+
+                if limit ~= nil and count > limit then
+                    return nil
+                end
                 return val
             end
 
@@ -850,7 +858,9 @@ local function local_tuple_select(space, query)
     return gen
 end
 
-local function remote_tuple_select(space, query, batch_size)
+local function interruptible_tuple_select(space, query, options)
+    options = options or {}
+    local batch_size = options.batch_size or 10
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
@@ -979,12 +989,12 @@ local function free_cursor(id)
     cursor_cache[id] = nil
 end
 
-function _document_remote_tuple_select(space_name, query, batch_size, cursor_id)
+function _document_remote_tuple_select(space_name, query, options, cursor_id)
     local space = box.space[space_name]
 
     local cursor = get_cursor(cursor_id)
     if cursor.gen == nil then
-        cursor.gen = remote_tuple_select(space, query, batch_size)
+        cursor.gen = interruptible_tuple_select(space, query, options)
     end
     local gen = cursor.gen
 
@@ -998,7 +1008,7 @@ function _document_remote_tuple_select(space_name, query, batch_size, cursor_id)
     return {batch, cursor_id}
 end
 
-local function remote_tuple_select(space, query, batch_size)
+local function remote_tuple_select(space, query, options)
     local conn = space.connection
     local space_name = space.name
     local batch = nil
@@ -1006,7 +1016,7 @@ local function remote_tuple_select(space, query, batch_size)
     local tuple_no = 0
 
     local ret = conn:call('_document_remote_tuple_select',
-                          {space_name, query, batch_size, nil})
+                          {space_name, query, options, nil})
     batch = ret[1]
     cursor = ret[2]
 
@@ -1039,8 +1049,8 @@ local function remote_tuple_select(space, query, batch_size)
     return gen
 end
 
-local function local_document_select(space, query)
-    local fun = local_tuple_select(space, query)
+local function local_document_select(space, query, options)
+    local fun = local_tuple_select(space, query, options)
 
     local function gen()
         return unflatten(space, fun())
@@ -1049,23 +1059,21 @@ local function local_document_select(space, query)
     return gen
 end
 
-local function tuple_select(space, query)
+local function tuple_select(space, query, options)
     if space_type(space) == "space" then
-        return local_tuple_select(space, query)
+        return local_tuple_select(space, query, options)
     else
-        return remote_tuple_select(space, query, 10)
+        return remote_tuple_select(space, query, options)
     end
 end
 
 local function remote_document_select(candidate_space, query, options)
     local state = nil
     local res = nil
-
-    if options == nil then
-        options = {batch_size=1024, limit=1000}
-    end
-
-    local batch_size = options.batch_size
+    local count = 0
+    options = options or {}
+    local limit = options.limit
+    local batch_size = options.batch_size or 1024
 
     local spaces = get_underlying_spaces(candidate_space)
     local space_no = 0
@@ -1092,7 +1100,17 @@ local function remote_document_select(candidate_space, query, options)
     end
 
     select_space_iterator = function()
-        space_iterator = tuple_select(space, query)
+        local leftover = nil
+        if limit then
+            leftover = limit - count
+
+            if leftover <= 0 then
+                return nil
+            end
+        end
+
+        space_iterator = tuple_select(space, query,
+                                      {limit=leftover, batch_size=batch_size})
 
         if space_iterator == nil then
             return nil
@@ -1129,6 +1147,12 @@ local function remote_document_select(candidate_space, query, options)
             return select_next_batch
         end
 
+        count = count + 1
+
+        if limit and count > limit then
+            return nil
+        end
+
         local res = unflatten(space, tuple)
 
         return select_next_tuple, res
@@ -1153,11 +1177,11 @@ local function remote_document_select(candidate_space, query, options)
     return gen
 end
 
-local function document_select(space, query)
+local function document_select(space, query, options)
     if space_type(space) == "space" then
-        return local_document_select(space, query)
+        return local_document_select(space, query, options)
     else
-        return remote_document_select(space, query)
+        return remote_document_select(space, query, options)
     end
 end
 
@@ -1166,7 +1190,7 @@ local function local_batch_tuple_select(space, queries)
     local result = {}
 
     for i, query in ipairs(queries) do
-        local it = local_tuple_select(space, query)
+        local it = local_tuple_select(space, query, options)
         local r = {}
 
         for value in it do
@@ -1181,17 +1205,17 @@ end
 function _document_remote_batch_tuple_select(space_name, queries)
     local space = box.space[space_name]
 
-    return local_batch_tuple_select(space, queries)
+    return local_batch_tuple_select(space, queries, options)
 end
 
-local function batch_tuple_select(space, queries)
+local function batch_tuple_select(space, queries, options)
     if space_type(space) == "space" then
-        return local_batch_tuple_select(space, queries)
+        return local_batch_tuple_select(space, queries, options)
     else
         local conn = space.connection
         local space_name = space.name
         return conn:call('_document_remote_batch_tuple_select',
-                         {space_name, queries})
+                         {space_name, queries, options})
     end
 end
 
@@ -1273,10 +1297,12 @@ local function document_delete(space, query)
 end
 
 
-local function tuple_join(space1, space2, query)
+local function tuple_join(space1, space2, query, options)
     local left = {}
     local right = {}
     local both = {}
+    options = options or {}
+    local limit = options.limit
 
     for _, condition in ipairs(query) do
         validate_join_condition(condition)
@@ -1318,6 +1344,7 @@ local function tuple_join(space1, space2, query)
     local left_iter = tuple_select(space1, left)
     local right_iter = nil
     local left_val = nil
+    local count = 0
 
     local function gen()
         while true do
@@ -1341,6 +1368,12 @@ local function tuple_join(space1, space2, query)
                 if right_val == nil then
                     right_iter = nil
                 else
+                    count = count + 1
+
+                    if limit ~= nil and count > limit then
+                        return nil
+                    end
+
                     return {left_val, right_val}
                 end
             end
@@ -1353,12 +1386,9 @@ end
 local function remote_document_join(space1, space2, query, options)
     local state = nil
     local res = nil
-
-    if options == nil then
-        options = {batch_size=1024, limit=1000}
-    end
-
-    local batch_size = options.batch_size
+    options = options or {}
+    local limit = options.limit
+    local batch_size = options.batch_size or 1024
 
     local left_spaces = get_underlying_spaces(space1)
     local right_spaces = get_underlying_spaces(space2)
@@ -1382,6 +1412,8 @@ local function remote_document_join(space1, space2, query, options)
     local tuples = nil
     local group_no = 0
     local tuple_no = 0
+    local count = 0
+    local leftover = nil
 
     local left_query = {}
     local right_query = {}
@@ -1411,7 +1443,16 @@ local function remote_document_join(space1, space2, query, options)
     end
 
     select_left_space_iterator = function()
-        left_space_iterator = tuple_select(left_space, left_query)
+        if limit then
+            leftover = limit - count
+
+            if leftover <= 0 then
+                return nil
+            end
+        end
+
+        left_space_iterator = tuple_select(left_space, left_query,
+                                           {limit=leftover, batch_size=batch_size})
 
         if left_space_iterator == nil then
             return nil
@@ -1473,7 +1514,8 @@ local function remote_document_join(space1, space2, query, options)
     select_tuples = function()
         group_no = 1
         tuple_no = 0
-        tuples = batch_tuple_select(right_space, compiled_query)
+        tuples = batch_tuple_select(right_space, compiled_query,
+                                    {limit=leftover, batch_size=batch_size})
 
         if #tuples == 0 then
             return select_next_right_space
@@ -1499,6 +1541,12 @@ local function remote_document_join(space1, space2, query, options)
             group_no = group_no + 1
             tuple_no = 0
             return select_next_tuple
+        end
+
+        count = count + 1
+
+        if limit and count > limit then
+            return nil
         end
 
         local left = unflatten(left_space, batch[group_no])
@@ -1527,8 +1575,8 @@ local function remote_document_join(space1, space2, query, options)
 end
 
 
-local function local_document_join(space1, space2, query)
-    local fun = tuple_join(space1, space2, query)
+local function local_document_join(space1, space2, query, options)
+    local fun = tuple_join(space1, space2, query, options)
 
     local function gen()
         local res = fun()
@@ -1547,11 +1595,11 @@ local function local_document_join(space1, space2, query)
     return gen
 end
 
-local function document_join(space1, space2, query)
+local function document_join(space1, space2, query, options)
     if space_type(space1) == "space" and space_type(space2) == "space" then
-        return local_document_join(space1, space2, query)
+        return local_document_join(space1, space2, query, options)
     else
-        return remote_document_join(space1, space2, query)
+        return remote_document_join(space1, space2, query, options)
     end
 end
 
