@@ -1499,7 +1499,7 @@ local function remote_document_join(space1, space2, query, options)
             for j, condition in ipairs(right_query) do
                 if type(condition[3]) == "string" and startswith(condition[3], "$") then
                     local field = string.sub(condition[3], 2, -1)
-                    local key = field_key(right_space, field)
+                    local key = field_key(left_space, field)
 
                     checks[j] = {condition[1], condition[2], tuple[key]}
                 else
