@@ -688,7 +688,7 @@ local function get_underlying_spaces(space)
 end
 
 local function space_get_primary_key(space)
-    local idx = space.index.primary
+    local idx = space.index[0]
     local key = idx.parts[1]
 
     return key
@@ -702,7 +702,7 @@ local function shard_get_primary_key_path(candidate_space)
         break
     end
 
-    local idx = space.index.primary
+    local idx = space.index[0]
     local key = idx.parts[1].fieldno
 
     local format = space:format()
@@ -782,7 +782,7 @@ local function local_tuple_select(space, query, options)
     local skip = nil
     local primary_value = nil
     local op = "ALL"
-    local index = space.index.primary
+    local index = space.index[0]
 
     if query == nil then
         query = {}
@@ -865,7 +865,7 @@ local function interruptible_tuple_select(space, query, options)
     local skip = nil
     local primary_value = nil
     local op = "ALL"
-    local index = space.index.primary
+    local index = space.index[0]
 
     if query == nil then
         query = {}
@@ -889,7 +889,7 @@ local function interruptible_tuple_select(space, query, options)
     end
 
     local primary_field_no = index.parts[1].fieldno
-    local pk_field_no = space.index.primary.parts[1].fieldno
+    local pk_field_no = space.index[0].parts[1].fieldno
 
     local checks = {}
 
@@ -1224,7 +1224,7 @@ local function local_document_delete(space, query)
     local skip = nil
     local primary_value = nil
     local op = "ALL"
-    local index = space.index.primary
+    local index = space.index[0]
 
     if query == nil then
         query = {}
@@ -1247,7 +1247,7 @@ local function local_document_delete(space, query)
         end
     end
 
-    local pk_field_no = space.index.primary.parts[1].fieldno
+    local pk_field_no = space.index[0].parts[1].fieldno
     local checks = {}
 
     for i=1,#query do
