@@ -831,16 +831,18 @@ local function local_tuple_select(space, query, options)
         while state ~= nil do
             local matches = true
 
-            for _, check in ipairs(checks) do
-                local lhs = val[check[1]]
-                local rhs = check[3]
-                if not check[2](lhs, rhs) then
-                    matches = false
-                    break
-                end
-            end
+            local status, _ = pcall(function()
+                    for _, check in ipairs(checks) do
+                        local lhs = val[check[1]]
+                        local rhs = check[3]
+                        if not check[2](lhs, rhs) then
+                            matches = false
+                            break
+                        end
+                    end
+            end)
 
-            if matches then
+            if matches and status then
                 count = count + 1
 
                 if limit ~= nil and count > limit then
@@ -925,16 +927,18 @@ local function interruptible_tuple_select(space, query, options)
             if not processed_primary_keys[pk] then
                 local matches = true
 
-                for _, check in ipairs(checks) do
-                    local lhs = val[check[1]]
-                    local rhs = check[3]
-                    if not check[2](lhs, rhs) then
-                        matches = false
-                        break
-                    end
-                end
+                local status, _ = pcall(function()
+                        for _, check in ipairs(checks) do
+                            local lhs = val[check[1]]
+                            local rhs = check[3]
+                            if not check[2](lhs, rhs) then
+                                matches = false
+                                break
+                            end
+                        end
+                end)
 
-                if matches then
+                if matches and status then
                     table.insert(batch, val)
                 end
             end
@@ -1607,6 +1611,7 @@ return {flatten = flatten,
         unflatten = unflatten,
         create_index = create_index,
         field_key = field_key,
+        get_field_by_path = document_get_field_by_path,
         get_schema = get_schema,
         set_schema = set_schema,
         extend_schema = extend_schema,
