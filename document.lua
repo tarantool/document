@@ -1189,6 +1189,14 @@ local function document_select(space, query, options)
     end
 end
 
+local function document_get(space, query)
+    for val in document_select(space, query, {limit=1}) do
+        return val
+    end
+
+    return nil
+end
+
 
 local function local_batch_tuple_select(space, queries)
     local result = {}
@@ -1618,4 +1626,5 @@ return {flatten = flatten,
         insert = document_insert,
         select = document_select,
         delete = document_delete,
-        join = document_join}
+        join = document_join,
+        get = document_get}
