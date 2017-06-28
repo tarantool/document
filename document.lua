@@ -1418,6 +1418,8 @@ local function tuple_join(space1, space2, query, options)
     options = options or {}
     local limit = options.limit
 
+    query = query or {}
+
     for _, condition in ipairs(query) do
         validate_join_condition(condition)
 
@@ -1496,6 +1498,87 @@ local function tuple_join(space1, space2, query, options)
 
     return gen
 end
+
+local function local_document_join_count(space1, space2, query, options)
+    local left = {}
+    local right = {}
+    local both = {}
+    options = options or {}
+    local limit = options.limit
+
+    query = query or {}
+
+    for _, condition in ipairs(query) do
+        validate_join_condition(condition)
+
+        if condition_type(condition) == "left" then
+            table.insert(left, condition)
+        elseif condition_type(condition) == "right" then
+            table.insert(right, {condition[3],
+                                 invert_op(condition[2]),
+                                 condition[1]})
+        elseif condition_type(condition) == "both" then
+            table.insert(both, {condition[3],
+                                invert_op(condition[2]),
+                                condition[1]})
+        end
+    end
+
+    for _, condition in ipairs(right) do
+        table.insert(both, condition)
+    end
+
+
+    local plan = {}
+    local checks = {}
+
+    for _, check in ipairs(both) do
+        if type(check[3]) == "string" and startswith(check[3], "$") then
+            local field = string.sub(check[3], 2, -1)
+            local key = field_key(space1, field)
+
+            table.insert(plan, {true, key})
+            table.insert(checks, {check[1], check[2], nil})
+        else
+            table.insert(plan, {false})
+            table.insert(checks, {check[1], check[2], check[3]})
+        end
+    end
+
+    local left_iter = tuple_select(space1, left)
+    local right_iter = nil
+    local left_val = nil
+    local count = 0
+
+    while true do
+        if right_iter == nil then
+            left_val = left_iter()
+
+            if left_val == nil then
+                return count
+            end
+
+            for i, p in ipairs(plan) do
+                if p[1] then
+                    checks[i][3] = left_val[p[2]]
+                end
+            end
+
+            right_iter = tuple_select(space2, checks)
+        else
+            local right_val = right_iter()
+
+            if right_val == nil then
+                right_iter = nil
+            else
+                count = count + 1
+            end
+        end
+    end
+
+    return count
+end
+
 
 local function remote_document_join(space1, space2, query, options)
     local state = nil
@@ -1688,6 +1771,174 @@ local function remote_document_join(space1, space2, query, options)
     return gen
 end
 
+local function remote_document_join_count(space1, space2, query, options)
+    local state = nil
+    local res = nil
+    options = options or {}
+    query = query or {}
+    local batch_size = options.batch_size or 1024
+
+    local left_spaces = get_underlying_spaces(space1)
+    local right_spaces = get_underlying_spaces(space2)
+    local left_space_no = 0
+    local right_space_no = 0
+    local left_space = nil
+    local right_space = nil
+
+    local left_space_iterator = nil
+
+    local batch = nil
+
+    local select_next_left_space = nil
+    local get_left_space_iterator = nil
+    local select_next_left_batch = nil
+    local select_next_right_space = nil
+    local compile_checks = nil
+    local select_tuples = nil
+    local select_next_tuple = nil
+
+    local tuples = nil
+    local group_no = 0
+    local tuple_no = 0
+    local count = 0
+    local leftover = nil
+
+    local left_query = {}
+    local right_query = {}
+
+    local compiled_query = {}
+
+    for _, condition in ipairs(query) do
+        validate_join_condition(condition)
+
+        if condition_type(condition) == "left" then
+            table.insert(left_query, condition)
+        else
+            table.insert(right_query, {condition[3],
+                                       invert_op(condition[2]),
+                                       condition[1]})
+        end
+    end
+
+    select_next_left_space = function()
+        left_space_no = left_space_no + 1
+        left_space = left_spaces[left_space_no]
+        if left_space == nil then
+            return nil
+        end
+
+        return select_left_space_iterator
+    end
+
+    select_left_space_iterator = function()
+        left_space_iterator = tuple_select(left_space, left_query,
+                                           {limit=nil, batch_size=batch_size})
+
+        if left_space_iterator == nil then
+            return nil
+        end
+
+        return select_next_left_batch
+    end
+
+    select_next_left_batch = function()
+        if left_space_iterator == nil then
+            return select_next_left_space
+        end
+
+        batch = take_batch(left_space_iterator, batch_size)
+
+        if #batch < batch_size then
+            left_space_iterator = nil
+        end
+
+        if #batch == 0 then
+            return select_next_left_space
+        end
+
+        right_space_no = 0
+        return select_next_right_space
+    end
+
+    select_next_right_space = function()
+        right_space_no = right_space_no + 1
+        right_space = right_spaces[right_space_no]
+        if right_space == nil then
+            return select_next_left_batch
+        end
+
+        return compile_checks
+    end
+
+    compile_checks = function()
+        compiled_query = {}
+        for i, tuple in ipairs(batch) do
+            checks = {}
+            compiled_query[i] = checks
+
+            for j, condition in ipairs(right_query) do
+                if type(condition[3]) == "string" and startswith(condition[3], "$") then
+                    local field = string.sub(condition[3], 2, -1)
+                    local key = field_key(left_space, field)
+
+                    checks[j] = {condition[1], condition[2], tuple[key]}
+                else
+                    checks[j] = condition
+                end
+            end
+        end
+
+        return select_tuples
+    end
+
+    select_tuples = function()
+        group_no = 1
+        tuple_no = 0
+        tuples = batch_tuple_select(right_space, compiled_query,
+                                    {limit=nil, batch_size=batch_size})
+
+        if #tuples == 0 then
+            return select_next_right_space
+        end
+
+        return select_next_tuple
+    end
+
+    select_next_tuple = function()
+        local tuple = nil
+
+        local group = tuples[group_no]
+
+        if group == nil then
+            return select_next_right_space
+        end
+
+        tuple_no = tuple_no + 1
+
+        local tuple = group[tuple_no]
+
+        if tuple == nil then
+            group_no = group_no + 1
+            tuple_no = 0
+            return select_next_tuple
+        end
+
+        count = count + 1
+
+        return select_next_tuple
+    end
+
+    state = select_next_left_space
+
+    while true do
+        state, res = state()
+
+        if state == nil then
+            return count
+        end
+    end
+end
+
 
 local function local_document_join(space1, space2, query, options)
     local fun = tuple_join(space1, space2, query, options)
@@ -1717,6 +1968,15 @@ local function document_join(space1, space2, query, options)
     end
 end
 
+local function document_join_count(space1, space2, query, options)
+    if space_type(space1) == "space" and space_type(space2) == "space" then
+        return local_document_join_count(space1, space2, query, options)
+    else
+        return remote_document_join_count(space1, space2, query, options)
+    end
+end
+
+
 return {flatten = flatten,
         unflatten = unflatten,
         create_index = create_index,
@@ -1729,5 +1989,6 @@ return {flatten = flatten,
         select = document_select,
         delete = document_delete,
         join = document_join,
+        join_count = document_join_count,
         get = document_get,
         count = document_count}
