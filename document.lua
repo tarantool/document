@@ -860,6 +860,108 @@ local function local_tuple_select(space, query, options)
     return gen
 end
 
+local function local_tuple_count(space, query, options)
+    options = options or {}
+    local schema = get_schema(space)
+    local skip = nil
+    local primary_value = nil
+    local op = "ALL"
+    local index = space.index[0]
+
+    if query == nil or #query == 0 then
+        return space:count()
+    end
+
+    for i=1,#query do
+        if condition_get_index(space, query[i]) ~= nil then
+
+            local primary_condition = query[i]
+
+            validate_select_condition(primary_condition)
+
+            local primary_field = string.sub(primary_condition[1], 2, -1)
+
+            index = field_index(space, primary_field)
+            op = op_to_tarantool(primary_condition[2])
+            primary_value = primary_condition[3]
+            skip = i
+            break
+        end
+    end
+
+    local checks = {}
+
+    for i=1,#query do
+        if i ~= skip then
+            local condition = query[i]
+            validate_select_condition(condition)
+            local field = string.sub(condition[1], 2, -1)
+
+            table.insert(checks, {field_key(space, field),
+                                  op_to_function(condition[2]),
+                                  condition[3]})
+        end
+    end
+
+    local result = {}
+
+    local count = 0
+
+    for _, val in index:pairs(primary_value, {iterator = op}) do
+            local matches = true
+
+            local status, _ = pcall(function()
+                    for _, check in ipairs(checks) do
+                        local lhs = val[check[1]]
+                        local rhs = check[3]
+                        if not check[2](lhs, rhs) then
+                            matches = false
+                            break
+                        end
+                    end
+            end)
+
+            if matches and status then
+                count = count + 1
+            end
+    end
+
+    return count
+end
+
+function _document_remote_tuple_count(space_name, query, options)
+    local space = box.space[space_name]
+
+    return local_tuple_count(space, query, options)
+end
+
+local function remote_tuple_count(space, query, options)
+    local conn = space.connection
+    local space_name = space.name
+
+
+
+    local count = conn:call('_document_remote_tuple_count',
+                            {space_name, query, options, nil})
+
+    return count
+end
+
+local function document_count(space, query, options)
+    if space_type(space) == "space" then
+        return local_tuple_count(space, query, options)
+    else
+        local spaces = get_underlying_spaces(space)
+
+        local count = 0
+        for _, candidate_space in ipairs(spaces) do
+            count = count + remote_tuple_count(candidate_space, query, options)
+        end
+
+        return count
+    end
+end
+
 local function interruptible_tuple_select(space, query, options)
     options = options or {}
     local batch_size = options.batch_size or 10
@@ -1627,4 +1729,5 @@ return {flatten = flatten,
         select = document_select,
         delete = document_delete,
         join = document_join,
-        get = document_get}
+        get = document_get,
+        count = document_count}
