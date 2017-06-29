@@ -1334,53 +1334,29 @@ local function batch_tuple_select(space, queries, options)
 end
 
 local function local_document_delete(space, query)
-    local schema = get_schema(space)
-    local skip = nil
-    local primary_value = nil
-    local op = "ALL"
-    local index = space.index[0]
-
-    if query == nil then
-        query = {}
-    end
-
-    for i=1,#query do
-        if condition_get_index(space, query[i]) ~= nil then
-
-            local primary_condition = query[i]
-
-            validate_select_condition(primary_condition)
-
-            local primary_field = string.sub(primary_condition[1], 2, -1)
-
-            index = field_index(space, primary_field)
-            op = op_to_tarantool(primary_condition[2])
-            primary_value = primary_condition[3]
-            skip = i
-            break
-        end
-    end
-
     local pk_field_no = space.index[0].parts[1].fieldno
     local checks = {}
 
-    for i=1,#query do
-        if i ~= skip then
-            local condition = query[i]
-            validate_select_condition(condition)
-            local field = string.sub(condition[1], 2, -1)
-
-            table.insert(checks, {field_key(space, field),
-                                  op_to_function(condition[2]),
-                                  condition[3]})
-        end
+    if query == nil or #query == 0 then
+        space:truncate()
+        return
     end
 
-    local result = {}
+    while true do
+        local batch = {}
 
-    for _, val in index:pairs(primary_value, {iterator = op}) do
-        local pk = val[pk_field_no]
-        space:delete(pk)
+        for val in local_tuple_select(space, query, {limit=1000}) do
+            local pk = val[pk_field_no]
+            table.insert(batch, pk)
+        end
+
+        if #batch == 0 then
+            break
+        end
+
+        for _, pk in ipairs(batch) do
+            space:delete(pk)
+        end
     end
 end
 
