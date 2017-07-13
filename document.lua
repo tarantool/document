@@ -267,7 +267,7 @@ local function extend_schema(tbl, schema)
     local function extend_schema_rec(tbl, schema, max_index)
         schema = shallowcopy(schema)
         for k, v in pairs(tbl) do
-            if type(v) == "table" then
+            if type(v) == "table" and not is_array(v) then
                 local new_schema = nil
                 new_schema, max_index = extend_schema_rec(
                     v, schema[k] or {}, max_index)
@@ -295,7 +295,7 @@ local function flatten_table(tbl, schema)
                 return nil
             end
 
-            if type(v) == "table" then
+            if type(v) == "table" and #entry == 0 then
                 flatten_table_rec(res, v, entry)
             else
                 res[entry[1]] = v
