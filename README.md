@@ -122,15 +122,23 @@ Insert table `tbl` into `space`.
 
 Delete documents from `space`, that match `query` (see Queries above)
 
-### `doc.select(space, query)`
+### `doc.select(space, query, options)`
 
 Select documents from `space` that match `query` (see Queries above)
 and return an iterator to the result set.
 
-### `doc.join(space1, space2, query)`
+`options` is a table with the following optional keys:
+- `limit`: maximum number of results to return
+- `offset`: the offset from the beginning of the result set
+
+### `doc.join(space1, space2, query, options)`
 
 Perform an inner join of spaces `space1` and `space2`, where both
 items satisfy `query` (see Queries above).
+
+`options` is a table with the following optional keys:
+- `limit`: maximum number of results to return
+- `offset`: the offset from the beginning of the result set
 
 ## Low level API
 
