@@ -778,6 +778,7 @@ end
 local function local_tuple_select(space, query, options)
     options = options or {}
     local limit = options.limit
+    local offset = options.offset or 0
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
@@ -845,10 +846,13 @@ local function local_tuple_select(space, query, options)
             if matches and status then
                 count = count + 1
 
-                if limit ~= nil and count > limit then
+                if limit ~= nil and count-offset > limit then
                     return nil
                 end
-                return val
+
+                if count > offset then
+                    return val
+                end
             end
 
             state, val = fun(param, state)
@@ -1179,6 +1183,7 @@ local function remote_document_select(candidate_space, query, options)
     local count = 0
     options = options or {}
     local limit = options.limit
+    local offset = options.offset or 0
     local batch_size = options.batch_size or 1024
 
     local spaces = get_underlying_spaces(candidate_space)
@@ -1208,7 +1213,7 @@ local function remote_document_select(candidate_space, query, options)
     select_space_iterator = function()
         local leftover = nil
         if limit then
-            leftover = limit - count
+            leftover = limit - math.max(0, count-offset)
 
             if leftover <= 0 then
                 return nil
@@ -1255,11 +1260,15 @@ local function remote_document_select(candidate_space, query, options)
 
         count = count + 1
 
-        if limit and count > limit then
+        if limit and count - offset > limit then
             return nil
         end
 
-        local res = unflatten(space, tuple)
+        local res = nil
+
+        if count > offset then
+            res = unflatten(space, tuple)
+        end
 
         return select_next_tuple, res
     end
@@ -1393,6 +1402,7 @@ local function tuple_join(space1, space2, query, options)
     local both = {}
     options = options or {}
     local limit = options.limit
+    local offset = options.offset or 0
 
     query = query or {}
 
@@ -1462,11 +1472,13 @@ local function tuple_join(space1, space2, query, options)
                 else
                     count = count + 1
 
-                    if limit ~= nil and count > limit then
+                    if limit ~= nil and count - offset > limit then
                         return nil
                     end
 
-                    return {left_val, right_val}
+                    if count > offset then
+                        return {left_val, right_val}
+                    end
                 end
             end
         end
@@ -1561,6 +1573,7 @@ local function remote_document_join(space1, space2, query, options)
     local res = nil
     options = options or {}
     local limit = options.limit
+    local offset = options.offset or 0
     local batch_size = options.batch_size or 1024
 
     local left_spaces = get_underlying_spaces(space1)
@@ -1617,7 +1630,7 @@ local function remote_document_join(space1, space2, query, options)
 
     select_left_space_iterator = function()
         if limit then
-            leftover = limit - count
+            leftover = limit - math.max(0, count-offset)
 
             if leftover <= 0 then
                 return nil
@@ -1625,7 +1638,7 @@ local function remote_document_join(space1, space2, query, options)
         end
 
         left_space_iterator = tuple_select(left_space, left_query,
-                                           {limit=leftover, batch_size=batch_size})
+                                           {batch_size=batch_size})
 
         if left_space_iterator == nil then
             return nil
@@ -1718,14 +1731,19 @@ local function remote_document_join(space1, space2, query, options)
 
         count = count + 1
 
-        if limit and count > limit then
+        if limit and count - offset > limit then
             return nil
         end
 
-        local left = unflatten(left_space, batch[group_no])
-        local right = unflatten(right_space, tuple)
+        local pair = nil
 
-        return select_next_tuple, {left, right}
+        if count > offset then
+            local left = unflatten(left_space, batch[group_no])
+            local right = unflatten(right_space, tuple)
+            pair = {left, right}
+        end
+
+        return select_next_tuple, pair
     end
 
     state = select_next_left_space
