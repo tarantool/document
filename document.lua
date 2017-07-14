@@ -742,7 +742,7 @@ local function shard_document_insert(space, value)
     local shard_key = document_get_field_by_path(value, primary_key_path)
 
     if shard_key == nil then
-        error("doc should have " .. shard_key_name)
+        error("doc should have " .. primary_key_path)
     end
 
     local nodes = shard.shard(shard_key)
