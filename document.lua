@@ -678,8 +678,19 @@ local function get_underlying_spaces(space)
         local spaces = {}
 
         for _, zone in pairs(shard.shards) do
-            local space = zone[1].conn.space[space.name]
-            table.insert(spaces, space)
+            local underlying = nil
+
+            for _, server in ipairs(zone) do
+                if server.conn ~= nil and server.conn:is_connected() then
+                    underlying = server.conn.space[space.name]
+                end
+            end
+
+            if underlying == nil then
+                error("Can't get underlying spaces of sharded space '" .. space.name .. "'. No live servers.")
+            end
+
+            table.insert(spaces, underlying)
         end
         return spaces
     else
