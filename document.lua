@@ -4,6 +4,7 @@ local math = require('math')
 local json = require('json')
 local yaml = require 'yaml'
 local shard = require 'shard'
+local msgpack = require 'msgpack'
 
 local MAX_REMOTE_CONNS_TO_CACHE = 100
 
