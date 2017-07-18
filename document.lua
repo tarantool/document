@@ -308,7 +308,13 @@ local function flatten_table(tbl, schema)
         return nil
     end
 
-    return flatten_table_rec({}, tbl, schema)
+    local res = {}
+
+    for i=1,schema_get_max_index(schema) do
+        res[i] = msgpack.NULL
+    end
+
+    return flatten_table_rec(res, tbl, schema)
 end
 
 local function unflatten_table(tbl, schema)
