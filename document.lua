@@ -1275,7 +1275,7 @@ local function remote_document_select(candidate_space, query, options)
     local tuple_no = 0
 
     local select_next_space = nil
-    local get_space_iterator = nil
+    local select_space_iterator = nil
     local select_next_batch = nil
     local select_next_tuple = nil
 
