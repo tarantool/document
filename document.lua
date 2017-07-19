@@ -558,17 +558,23 @@ local function op_to_tarantool(op_str)
     end
 end
 
+local function eq(lhs, rhs) return lhs == rhs end
+local function lt(lhs, rhs) return lhs < rhs end
+local function le(lhs, rhs) return lhs <= rhs end
+local function gt(lhs, rhs) return lhs > rhs end
+local function ge(lhs, rhs) return lhs >= rhs end
+
 local function op_to_function(op_str)
     if op_str == "==" then
-        return function(lhs, rhs) return lhs == rhs end
+        return eq
     elseif op_str == "<" then
-        return function(lhs, rhs) return lhs < rhs end
+        return lt
     elseif op_str == "<=" then
-        return function(lhs, rhs) return lhs <= rhs end
+        return le
     elseif op_str == ">" then
-        return function(lhs, rhs) return lhs > rhs end
+        return gt
     elseif op_str == ">=" then
-        return function(lhs, rhs) return lhs >= rhs end
+        return ge
     else
         return nil
     end
@@ -800,6 +806,8 @@ local function local_tuple_select(space, query, options)
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
+    local primary_field_key = space.index[0].parts[1].fieldno
+    local primary_condition = nil
     local op = "ALL"
     local index = space.index[0]
 
@@ -809,8 +817,7 @@ local function local_tuple_select(space, query, options)
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
-
-            local primary_condition = query[i]
+            primary_condition = query[i]
 
             validate_select_condition(primary_condition)
 
@@ -819,6 +826,7 @@ local function local_tuple_select(space, query, options)
             index = field_index(space, primary_field)
             op = op_to_tarantool(primary_condition[2])
             primary_value = primary_condition[3]
+            primary_field_key = index.parts[1].fieldno
             skip = i
             break
         end
@@ -849,17 +857,33 @@ local function local_tuple_select(space, query, options)
 
         while state ~= nil do
             local matches = true
+            local early_exit = false
 
             local status, _ = pcall(function()
                     for _, check in ipairs(checks) do
                         local lhs = val[check[1]]
                         local rhs = check[3]
                         if not check[2](lhs, rhs) then
+                            if check[1] == primary_field_key then
+                                if ((primary_condition[2] == ">=" or primary_condition[2] == ">") and
+                                        (check[2] == lt or check[2] == le)) or
+                                    ((primary_condition[2] == "<=" or primary_condition[2] == "<") and
+                                        (check[2] == gt or check[2] == ge)) then
+
+                                        early_exit = true
+                                        break
+                                end
+                            end
+
                             matches = false
                             break
                         end
                     end
             end)
+
+            if early_exit then
+                return nil
+            end
 
             if matches and status then
                 count = count + 1
@@ -887,6 +911,8 @@ local function local_tuple_count(space, query, options)
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
+    local primary_field_key = space.index[0].parts[1].fieldno
+    local primary_condition = nil
     local op = "ALL"
     local index = space.index[0]
 
@@ -896,8 +922,7 @@ local function local_tuple_count(space, query, options)
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
-
-            local primary_condition = query[i]
+            primary_condition = query[i]
 
             validate_select_condition(primary_condition)
 
@@ -906,6 +931,7 @@ local function local_tuple_count(space, query, options)
             index = field_index(space, primary_field)
             op = op_to_tarantool(primary_condition[2])
             primary_value = primary_condition[3]
+            primary_field_key = index.parts[1].fieldno
             skip = i
             break
         end
@@ -931,17 +957,33 @@ local function local_tuple_count(space, query, options)
 
     for _, val in index:pairs(primary_value, {iterator = op}) do
             local matches = true
+            local early_exit = false
 
             local status, _ = pcall(function()
                     for _, check in ipairs(checks) do
                         local lhs = val[check[1]]
                         local rhs = check[3]
                         if not check[2](lhs, rhs) then
+                            if check[1] == primary_field_key then
+                                if ((primary_condition[2] == ">=" or primary_condition[2] == ">") and
+                                        (check[2] == lt or check[2] == le)) or
+                                    ((primary_condition[2] == "<=" or primary_condition[2] == "<") and
+                                        (check[2] == gt or check[2] == ge)) then
+
+                                        early_exit = true
+                                        break
+                                end
+                            end
+
                             matches = false
                             break
                         end
                     end
             end)
+
+            if early_exit then
+                return count
+            end
 
             if matches and status then
                 count = count + 1
@@ -990,6 +1032,8 @@ local function interruptible_tuple_select(space, query, options)
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
+    local primary_field_key = space.index[0].parts[1].fieldno
+    local primary_condition = nil
     local op = "ALL"
     local index = space.index[0]
 
@@ -999,8 +1043,7 @@ local function interruptible_tuple_select(space, query, options)
 
     for i=1,#query do
         if condition_get_index(space, query[i]) ~= nil then
-
-            local primary_condition = query[i]
+            primary_condition = query[i]
 
             validate_select_condition(primary_condition)
 
@@ -1009,6 +1052,7 @@ local function interruptible_tuple_select(space, query, options)
             index = field_index(space, primary_field)
             op = op_to_tarantool(primary_condition[2])
             primary_value = primary_condition[3]
+            primary_field_key = index.parts[1].fieldno
             skip = i
             break
         end
@@ -1048,6 +1092,8 @@ local function interruptible_tuple_select(space, query, options)
             local new_value = val[primary_field_no]
             local pk = val[pk_field_no]
 
+            local early_exit = false
+
             if not processed_primary_keys[pk] then
                 local matches = true
 
@@ -1056,6 +1102,17 @@ local function interruptible_tuple_select(space, query, options)
                             local lhs = val[check[1]]
                             local rhs = check[3]
                             if not check[2](lhs, rhs) then
+                                if check[1] == primary_field_key then
+                                    if ((primary_condition[2] == ">=" or primary_condition[2] == ">") and
+                                            (check[2] == lt or check[2] == le)) or
+                                        ((primary_condition[2] == "<=" or primary_condition[2] == "<") and
+                                            (check[2] == gt or check[2] == ge)) then
+
+                                            early_exit = true
+                                    end
+                                end
+
+
                                 matches = false
                                 break
                             end
@@ -1065,6 +1122,10 @@ local function interruptible_tuple_select(space, query, options)
                 if matches and status then
                     table.insert(batch, val)
                 end
+            end
+
+            if early_exit then
+                break
             end
 
             if last_value == new_value then
