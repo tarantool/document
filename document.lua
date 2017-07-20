@@ -1131,7 +1131,7 @@ local function interruptible_tuple_select(space, query, options)
             if last_value == new_value then
                 processed_primary_keys[pk] = true
             else
-                processed_primary_keys = {}
+                processed_primary_keys = {[pk] = true}
                 last_value = new_value
             end
 
@@ -1165,9 +1165,9 @@ local function get_cursor(id)
 
         local cursor = {}
         cursor_cache[cursor_id] = cursor
-        return cursor
+        return cursor, cursor_id
     else
-        return cursor_cache[id]
+        return cursor_cache[id], id
     end
 end
 
@@ -1181,7 +1181,9 @@ end
 function _document_remote_tuple_select(space_name, query, options, cursor_id)
     local space = box.space[space_name]
 
-    local cursor = get_cursor(cursor_id)
+    local cursor = nil
+    cursor, cursor_id = get_cursor(cursor_id)
+
     if cursor.gen == nil then
         cursor.gen = interruptible_tuple_select(space, query, options)
     end
