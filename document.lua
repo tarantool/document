@@ -1154,10 +1154,10 @@ local cursor_cache = {}
 
 local function get_cursor(id)
     if id == nil then
-        local cursor_id = #cursor_cache
+        local cursor_id = #cursor_cache + 1
 
         for i, cursor in pairs(cursor_cache) do
-            if cursor == nil then
+            if cursor == msgpack.NULL then
                 cursor_id = i
                 break
             end
@@ -1175,7 +1175,7 @@ local function free_cursor(id)
     if id == nil then
         return
     end
-    cursor_cache[id] = nil
+    cursor_cache[id] = msgpack.NULL
 end
 
 function _document_remote_tuple_select(space_name, query, options, cursor_id)
@@ -2066,4 +2066,5 @@ return {flatten = flatten,
         join = document_join,
         join_count = document_join_count,
         get = document_get,
-        count = document_count}
+        count = document_count,
+        tuple_join = tuple_join}
