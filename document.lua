@@ -5,7 +5,9 @@ local json = require('json')
 local yaml = require 'yaml'
 local shard = require 'shard'
 local msgpack = require 'msgpack'
+local fun = require 'fun'
 
+local DEFAULT_BATCH_SIZE = 1024
 local MAX_REMOTE_CONNS_TO_CACHE = 100
 
 local local_schema_cache = {}
@@ -14,6 +16,10 @@ setmetatable(remote_schema_cache, { __mode = 'k' })
 
 local local_schema_id = nil
 local remote_schema_id = {}
+
+local function unwrap(self)
+    return self.gen, self.param, self.state
+end
 
 local function is_array(table)
     local max = 0
@@ -542,6 +548,22 @@ local function create_index(space, index_name, orig_options)
 
 end
 
+local function cmp(op_str, lhs, rhs)
+    if op_str == "==" then
+        return lhs == rhs
+    elseif op_str == "<" then
+        return lhs < rhs
+    elseif op_str == "<=" then
+        return lhs <= rhs
+    elseif op_str == ">" then
+        return lhs > rhs
+    elseif op_str == ">=" then
+        return lhs >= rhs
+    else
+        return nil
+    end
+end
+
 local function op_to_tarantool(op_str)
     if op_str == "==" then
         return "EQ"
@@ -663,17 +685,7 @@ end
 
 
 local function take_batch(it, batch_size)
-    local res = {}
-
-    for i=1,batch_size do
-        local val = it()
-        if val == nil then
-            return res
-        end
-        res[i] = val
-    end
-
-    return res
+    return fun.totable(fun.take_n(batch_size, unwrap(it)))
 end
 
 local function space_type(space)
@@ -740,6 +752,17 @@ local function shard_get_primary_key_path(candidate_space)
     return nil
 end
 
+local function index_by_field_num(space, field_num)
+    for _, idx in pairs(space.index) do
+        local parts = idx.parts
+        if #parts == 1 and parts[1].fieldno == field_num then
+            return idx
+        end
+    end
+
+    return nil
+end
+
 local function local_document_insert(space, value)
     local flat = flatten(space, value)
     space:replace(flat)
@@ -799,93 +822,111 @@ local function document_insert(space, value)
     end
 end
 
-local function local_tuple_select(space, query, options)
-    options = options or {}
-    local limit = options.limit
-    local offset = options.offset or 0
-    local schema = get_schema(space)
-    local skip = nil
-    local primary_value = nil
-    local primary_field_key = space.index[0].parts[1].fieldno
+local function prepare_query(space, query, options)
+    local primary_field_num = space.index[0].parts[1].fieldno
     local primary_condition = nil
     local op = "ALL"
     local index = space.index[0]
+    local space_gen = space:pairs().gen
+    local skip = nil
+    options = options or {}
+    limit = options.limit or nil
+    offset = options.offset or 0
 
-    if query == nil then
-        query = {}
-    end
+    for i, entry in ipairs(query) do
+        local idx = index_by_field_num(space, entry[1])
 
-    for i=1,#query do
-        if condition_get_index(space, query[i]) ~= nil then
-            primary_condition = query[i]
-
-            validate_select_condition(primary_condition)
-
-            local primary_field = string.sub(primary_condition[1], 2, -1)
-
-            index = field_index(space, primary_field)
-            op = op_to_tarantool(primary_condition[2])
-            primary_value = primary_condition[3]
-            primary_field_key = index.parts[1].fieldno
+        if idx then
+            primary_condition = entry
+            op = op_to_tarantool(entry[2])
             skip = i
-            break
+            index = idx
         end
     end
 
-    local checks = {}
+    local res = {index,
+                 op,
+                 space_gen,
+                 query,
+                 primary_condition,
+                 primary_field_num,
+                 skip,
+                 limit,
+                 offset}
 
-    for i=1,#query do
-        if i ~= skip then
-            local condition = query[i]
-            validate_select_condition(condition)
-            local field = string.sub(condition[1], 2, -1)
+    return res
+end
 
-            table.insert(checks, {field_key(space, field),
-                                  op_to_function(condition[2]),
-                                  condition[3]})
-        end
+local function select_tuple_prepared(space, prepared_query, cache)
+    local primary_value = nil
+
+    if prepared_query[5] then
+        primary_value = prepared_query[5][3]
     end
 
-    local result = {}
+    local _, select_param, select_state = prepared_query[1]:pairs(
+        primary_value,
+        prepared_query[2])
 
-    local fun, param, state = index:pairs(primary_value, {iterator = op})
-    local count = 0
+    --local param = {prepared_query, select_param}
+    --local state = {select_state, 0}
+    local param = nil
+    local state = nil
 
-    local function gen()
-        local val = nil
-        state, val = fun(param, state)
+    if cache then
+        param = cache[1]
+        state = cache[2]
+        param[1] = prepared_query
+        param[2] = select_param
+        state[1] = select_state
+        state[2] = 0
+    else
+        param = {prepared_query, select_param}
+        state = {select_state, 0}
+    end
 
-        while state ~= nil do
-            local matches = true
-            local early_exit = false
+    local function gen(param, state)
+        local prepared_query, select_param = unpack(param)
 
-            local status, _ = pcall(function()
-                    for _, check in ipairs(checks) do
-                        local lhs = val[check[1]]
-                        local rhs = check[3]
-                        if not check[2](lhs, rhs) then
-                            if check[1] == primary_field_key then
-                                if ((primary_condition[2] == ">=" or primary_condition[2] == ">") and
-                                        (check[2] == lt or check[2] == le)) or
-                                    ((primary_condition[2] == "<=" or primary_condition[2] == "<") and
-                                        (check[2] == gt or check[2] == ge)) then
+        local index, op, space_gen, query, primary_condition, primary_field_num, skip, limit, offset = unpack(prepared_query)
 
-                                        early_exit = true
-                                        break
-                                end
-                            end
+        local select_state, count = unpack(state)
 
-                            matches = false
-                            break
-                        end
-                    end
-            end)
+        while true do
+            select_state, val = space_gen(select_param, select_state)
 
-            if early_exit then
+            if select_state == nil then
                 return nil
             end
 
-            if matches and status then
+            local matches = true
+
+            for i, check in ipairs(query) do
+                if i ~= skip then
+                    local lhs = val[check[1]]
+                    local op = check[2]
+                    local rhs = check[3]
+
+                    local status, res = pcall(cmp, op, lhs, rhs)
+
+                    if not status or not res then
+                        matches = false
+
+                        if check[1] == primary_field_num then
+                            if ((primary_condition[2] == ">=" or
+                                     primary_condition[2] == ">") and
+                                    (check[2] == "<" or check[2] == "<=")) or
+                                ((primary_condition[2] == "<=" or
+                                      primary_condition[2] == "<") and
+                                    (check[2] == ">" or check[2] == ">=")) then
+                                    return nil
+                            end
+                        end
+                    end
+                end
+            end
+
+            if matches then
                 count = count + 1
 
                 if limit ~= nil and count-offset > limit then
@@ -893,101 +934,62 @@ local function local_tuple_select(space, query, options)
                 end
 
                 if count > offset then
-                    return val
+                    state.select_state = select_state
+                    state.count = count
+                    return state, val
                 end
             end
-
-            state, val = fun(param, state)
         end
 
         return nil
     end
 
-    return gen
+    return gen, param, state
 end
 
-local function local_tuple_count(space, query, options)
-    options = options or {}
-    local schema = get_schema(space)
-    local skip = nil
-    local primary_value = nil
-    local primary_field_key = space.index[0].parts[1].fieldno
-    local primary_condition = nil
-    local op = "ALL"
-    local index = space.index[0]
 
-    if query == nil or #query == 0 then
-        return space:count()
-    end
-
-    for i=1,#query do
-        if condition_get_index(space, query[i]) ~= nil then
-            primary_condition = query[i]
-
-            validate_select_condition(primary_condition)
-
-            local primary_field = string.sub(primary_condition[1], 2, -1)
-
-            index = field_index(space, primary_field)
-            op = op_to_tarantool(primary_condition[2])
-            primary_value = primary_condition[3]
-            primary_field_key = index.parts[1].fieldno
-            skip = i
-            break
-        end
-    end
-
+local function local_tuple_select(space, query, options)
     local checks = {}
 
-    for i=1,#query do
-        if i ~= skip then
+    if query ~= nil then
+        for i=1,#query do
             local condition = query[i]
             validate_select_condition(condition)
             local field = string.sub(condition[1], 2, -1)
 
             table.insert(checks, {field_key(space, field),
-                                  op_to_function(condition[2]),
+                                  condition[2],
                                   condition[3]})
         end
     end
 
-    local result = {}
+    local prepared_query = prepare_query(space, checks, options)
+
+    return select_tuple_prepared(space, prepared_query)
+end
+
+local function local_tuple_count(space, query, options)
+    if query == nil or #query == 0 then
+        return space:count()
+    end
+
+    local checks = {}
+
+    for i=1,#query do
+        local condition = query[i]
+        validate_select_condition(condition)
+        local field = string.sub(condition[1], 2, -1)
+
+        table.insert(checks, {field_key(space, field),
+                              condition[2],
+                              condition[3]})
+    end
+
+    local prepared_query = prepare_query(space, checks, options)
 
     local count = 0
-
-    for _, val in index:pairs(primary_value, {iterator = op}) do
-            local matches = true
-            local early_exit = false
-
-            local status, _ = pcall(function()
-                    for _, check in ipairs(checks) do
-                        local lhs = val[check[1]]
-                        local rhs = check[3]
-                        if not check[2](lhs, rhs) then
-                            if check[1] == primary_field_key then
-                                if ((primary_condition[2] == ">=" or primary_condition[2] == ">") and
-                                        (check[2] == lt or check[2] == le)) or
-                                    ((primary_condition[2] == "<=" or primary_condition[2] == "<") and
-                                        (check[2] == gt or check[2] == ge)) then
-
-                                        early_exit = true
-                                        break
-                                end
-                            end
-
-                            matches = false
-                            break
-                        end
-                    end
-            end)
-
-            if early_exit then
-                return count
-            end
-
-            if matches and status then
-                count = count + 1
-            end
+    for _, v in select_tuple_prepared(space, prepared_query) do
+        count = count + 1
     end
 
     return count
@@ -1002,8 +1004,6 @@ end
 local function remote_tuple_count(space, query, options)
     local conn = space.connection
     local space_name = space.name
-
-
 
     local count = conn:call('_document_remote_tuple_count',
                             {space_name, query, options, nil})
@@ -1028,7 +1028,7 @@ end
 
 local function interruptible_tuple_select(space, query, options)
     options = options or {}
-    local batch_size = options.batch_size or 10
+    local batch_size = options.batch_size or DEFAULT_BATCH_SIZE
     local schema = get_schema(space)
     local skip = nil
     local primary_value = nil
@@ -1200,54 +1200,57 @@ function _document_remote_tuple_select(space_name, query, options, cursor_id)
 end
 
 local function remote_tuple_select(space, query, options)
-    local conn = space.connection
-    local space_name = space.name
-    local batch = nil
-    local cursor = nil
-    local tuple_no = 0
+    local param = {conn = space.connection,
+                   space_name = space.name,
+                   batch_size = options.batch_size}
 
-    local ret = conn:call('_document_remote_tuple_select',
-                          {space_name, query, options, nil})
-    batch = ret[1]
-    cursor = ret[2]
+    local ret = param.conn:call('_document_remote_tuple_select',
+                          {space.name, query, options, nil})
 
-    local function gen()
+    local state = {batch = ret[1],
+                   cursor = ret[2],
+                   tuple_no = 0}
+
+    local function gen(param, state)
+        local conn = param.conn
+        local space_name = param.space_name
+        local batch_size = param.batch_size
+
         while true do
-            if batch == nil then
+            if state.batch == nil then
                 return nil
             end
 
-            tuple_no = tuple_no + 1
+            state.tuple_no = state.tuple_no + 1
 
-            local tuple = batch[tuple_no]
+            local tuple = state.batch[state.tuple_no]
 
             if tuple ~= nil then
-                return tuple
+                return state, tuple
             end
 
-            if cursor ~= nil then
+            if state.cursor ~= nil then
                 ret = conn:call('_document_remote_tuple_select',
-                                {space_name, query, batch_size, cursor})
-                batch = ret[1]
-                cursor = ret[2]
-                tuple_no = 0
+                                {space_name, query, batch_size, state.cursor})
+
+                state.batch = ret[1]
+                state.cursor = ret[2]
+                state.tuple_no = 0
             else
                 return nil
             end
         end
     end
 
-    return gen
+    return gen, param, state
 end
 
 local function local_document_select(space, query, options)
-    local fun = local_tuple_select(space, query, options)
-
-    local function gen()
-        return unflatten(space, fun())
+    local function tr(val)
+        return unflatten(space, val)
     end
 
-    return gen
+    return fun.map(tr, local_tuple_select(space, query, options))
 end
 
 local function tuple_select(space, query, options)
@@ -1265,7 +1268,7 @@ local function remote_document_select(candidate_space, query, options)
     options = options or {}
     local limit = options.limit
     local offset = options.offset or 0
-    local batch_size = options.batch_size or 1024
+    local batch_size = options.batch_size or DEFAULT_BATCH_SIZE
 
     local spaces = get_underlying_spaces(candidate_space)
     local space_no = 0
@@ -1301,8 +1304,8 @@ local function remote_document_select(candidate_space, query, options)
             end
         end
 
-        space_iterator = tuple_select(space, query,
-                                      {limit=leftover, batch_size=batch_size})
+        space_iterator = fun.wrap(tuple_select(space, query,
+                                               {limit=leftover, batch_size=batch_size}))
 
         if space_iterator == nil then
             return nil
@@ -1356,8 +1359,9 @@ local function remote_document_select(candidate_space, query, options)
 
     state = select_next_space
 
-    local function gen()
+    local function gen(param, state)
         while true do
+            local res = nil
             state, res = state()
 
             if state == nil then
@@ -1365,12 +1369,12 @@ local function remote_document_select(candidate_space, query, options)
             end
 
             if res ~= nil then
-                return res
+                return state, res
             end
         end
     end
 
-    return gen
+    return gen, true, state
 end
 
 local function document_select(space, query, options)
@@ -1394,10 +1398,9 @@ local function local_batch_tuple_select(space, queries)
     local result = {}
 
     for i, query in ipairs(queries) do
-        local it = local_tuple_select(space, query, options)
         local r = {}
 
-        for value in it do
+        for _, value in local_tuple_select(space, query, options) do
             table.insert(r, value)
         end
         result[i] = r
@@ -1515,26 +1518,30 @@ local function tuple_join(space1, space2, query, options)
         if type(check[3]) == "string" and startswith(check[3], "$") then
             local field = string.sub(check[3], 2, -1)
             local key = field_key(space1, field)
-
             table.insert(plan, {true, key})
-            table.insert(checks, {check[1], check[2], nil})
+
+            field = string.sub(check[1], 2, -1)
+            table.insert(checks, {field_key(space2, field), check[2], nil})
         else
             table.insert(plan, {false})
-            table.insert(checks, {check[1], check[2], check[3]})
+            local field = string.sub(check[1], 2, -1)
+            table.insert(checks, {field_key(space2, field), check[2], check[3]})
         end
     end
 
-    local left_iter = tuple_select(space1, left)
-    local right_iter = nil
+    local left_gen, left_param, left_state = tuple_select(space1, left)
+    local right_gen, right_param, right_state = nil
     local left_val = nil
     local count = 0
 
+    local right_prepared = prepare_query(space2, checks)
+    local right_cache = {{0,0},{0,0}}
     local function gen()
         while true do
-            if right_iter == nil then
-                left_val = left_iter()
+            if right_state == nil then
+                left_state, left_val = left_gen(left_param, left_state)
 
-                if left_val == nil then
+                if left_state == nil then
                     return nil
                 end
 
@@ -1544,12 +1551,15 @@ local function tuple_join(space1, space2, query, options)
                     end
                 end
 
-                right_iter = tuple_select(space2, checks)
+                right_gen, right_param, right_state = select_tuple_prepared(space2,
+                                                                            right_prepared, right_cache)
             else
-                local right_val = right_iter()
+                local right_val = nil
+
+                right_state, right_val = right_gen(right_param, right_state)
 
                 if right_val == nil then
-                    right_iter = nil
+                    right_state = nil
                 else
                     count = count + 1
 
@@ -1558,91 +1568,21 @@ local function tuple_join(space1, space2, query, options)
                     end
 
                     if count > offset then
-                        return {left_val, right_val}
+                        return true, {left_val, right_val}
                     end
                 end
             end
         end
     end
 
-    return gen
+    return gen, true, true
 end
 
 local function local_document_join_count(space1, space2, query, options)
-    local left = {}
-    local right = {}
-    local both = {}
-    options = options or {}
-    local limit = options.limit
-
-    query = query or {}
-
-    for _, condition in ipairs(query) do
-        validate_join_condition(condition)
-
-        if condition_type(condition) == "left" then
-            table.insert(left, condition)
-        elseif condition_type(condition) == "right" then
-            table.insert(right, {condition[3],
-                                 invert_op(condition[2]),
-                                 condition[1]})
-        elseif condition_type(condition) == "both" then
-            table.insert(both, {condition[3],
-                                invert_op(condition[2]),
-                                condition[1]})
-        end
-    end
-
-    for _, condition in ipairs(right) do
-        table.insert(both, condition)
-    end
-
-
-    local plan = {}
-    local checks = {}
-
-    for _, check in ipairs(both) do
-        if type(check[3]) == "string" and startswith(check[3], "$") then
-            local field = string.sub(check[3], 2, -1)
-            local key = field_key(space1, field)
-
-            table.insert(plan, {true, key})
-            table.insert(checks, {check[1], check[2], nil})
-        else
-            table.insert(plan, {false})
-            table.insert(checks, {check[1], check[2], check[3]})
-        end
-    end
-
-    local left_iter = tuple_select(space1, left)
-    local right_iter = nil
-    local left_val = nil
     local count = 0
 
-    while true do
-        if right_iter == nil then
-            left_val = left_iter()
-
-            if left_val == nil then
-                return count
-            end
-
-            for i, p in ipairs(plan) do
-                if p[1] then
-                    checks[i][3] = left_val[p[2]]
-                end
-            end
-
-            right_iter = tuple_select(space2, checks)
-        else
-            local right_val = right_iter()
-
-            if right_val == nil then
-                right_iter = nil
-            else
-                count = count + 1
-            end
-        end
+    for _, v in tuple_join(space1, space2, query, options) do
+        count = count + 1
     end
 
     return count
@@ -1653,9 +1593,10 @@ local function remote_document_join(space1, space2, query, options)
     local state = nil
     local res = nil
     options = options or {}
+    query = query or {}
     local limit = options.limit
     local offset = options.offset or 0
-    local batch_size = options.batch_size or 1024
+    local batch_size = options.batch_size or DEFAULT_BATCH_SIZE
 
     local left_spaces = get_underlying_spaces(space1)
     local right_spaces = get_underlying_spaces(space2)
@@ -1718,8 +1659,8 @@ local function remote_document_join(space1, space2, query, options)
             end
         end
 
-        left_space_iterator = tuple_select(left_space, left_query,
-                                           {batch_size=batch_size})
+        left_space_iterator = fun.wrap(tuple_select(left_space, left_query,
+                                                    {batch_size=batch_size}))
 
         if left_space_iterator == nil then
             return nil
@@ -1829,8 +1770,9 @@ local function remote_document_join(space1, space2, query, options)
 
     state = select_next_left_space
 
-    local function gen()
+    local function gen(param, state)
         while true do
+            local res = nil
             state, res = state()
 
             if state == nil then
@@ -1838,12 +1780,12 @@ local function remote_document_join(space1, space2, query, options)
             end
 
             if res ~= nil then
-                return res
+                return state, res
             end
         end
     end
 
-    return gen
+    return gen, true, state
 end
 
 local function remote_document_join_count(space1, space2, query, options)
@@ -1851,7 +1793,7 @@ local function remote_document_join_count(space1, space2, query, options)
     local res = nil
     options = options or {}
     query = query or {}
-    local batch_size = options.batch_size or 1024
+    local batch_size = options.batch_size or DEFAULT_BATCH_SIZE
 
     local left_spaces = get_underlying_spaces(space1)
     local right_spaces = get_underlying_spaces(space2)
@@ -1906,8 +1848,8 @@ local function remote_document_join_count(space1, space2, query, options)
     end
 
     select_left_space_iterator = function()
-        left_space_iterator = tuple_select(left_space, left_query,
-                                           {limit=nil, batch_size=batch_size})
+        left_space_iterator = fun.wrap(tuple_select(left_space, left_query,
+                                                    {limit=nil, batch_size=batch_size}))
 
         if left_space_iterator == nil then
             return nil
@@ -2016,23 +1958,12 @@ end
 
 
 local function local_document_join(space1, space2, query, options)
-    local fun = tuple_join(space1, space2, query, options)
-
-    local function gen()
-        local res = fun()
-
-        if res == nil then
-            return nil
-        end
-
-        local tuple1 = res[1]
-        local tuple2 = res[2]
-
-        return {unflatten(space1, tuple1),
-                unflatten(space2, tuple2)}
+    local function tr(val)
+        return {unflatten(space1, val[1]),
+                unflatten(space2, val[2])}
     end
 
-    return gen
+    return fun.map(tr, tuple_join(space1, space2, query, options))
 end
 
 local function document_join(space1, space2, query, options)
@@ -2062,6 +1993,7 @@ return {flatten = flatten,
         extend_schema = extend_schema,
         insert = document_insert,
         select = document_select,
+        tuple_select = tuple_select,
         delete = document_delete,
         join = document_join,
         join_count = document_join_count,
