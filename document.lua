@@ -1402,7 +1402,7 @@ local function document_select(space, query, options)
 end
 
 local function document_get(space, query)
-    for val in document_select(space, query, {limit=1}) do
+    for _, val in document_select(space, query, {limit=1}) do
         return val
     end
 
