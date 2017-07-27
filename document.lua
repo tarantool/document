@@ -849,6 +849,7 @@ local function prepare_query(space, query, options)
             op = op_to_tarantool(entry[2])
             skip = i
             index = idx
+            break
         end
     end
 
