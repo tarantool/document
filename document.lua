@@ -845,6 +845,7 @@ local function prepare_query(space, query, options)
         local idx = index_by_field_num(space, entry[1])
 
         if idx then
+            primary_field_num = entry[1]
             primary_condition = entry
             op = op_to_tarantool(entry[2])
             skip = i
