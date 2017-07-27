@@ -510,7 +510,15 @@ local function field_index(space, path)
 end
 
 local function create_index(space, index_name, orig_options)
+    if space == nil then
+        error("create_index: space is nil")
+    end
+
     local schema = get_schema(space)
+
+    if schema == nil then
+        error("create_index: Failed to get space schema: " .. space.name)
+    end
 
     local options = {}
 
@@ -934,8 +942,9 @@ local function select_tuple_prepared(space, prepared_query, cache)
                 end
 
                 if count > offset then
-                    state.select_state = select_state
-                    state.count = count
+                    state[1] = select_state
+                    state[2] = count
+
                     return state, val
                 end
             end
@@ -1085,7 +1094,14 @@ local function interruptible_tuple_select(space, query, options)
 
         if last_value ~= nil then
             value = last_value
-            opts = {iterator = 'GE'}
+
+            if primary_condition then
+                if primary_condition[2] == ">" then
+                    opts = {iterator = "GE"}
+                elseif primary_condition[2] == "<" then
+                    opts = {iterator = "LE"}
+                end
+            end
         end
 
         for _, val in index:pairs(value, opts) do
