@@ -303,7 +303,9 @@ local function flatten_table(tbl, schema)
             end
 
             if type(v) == "table" and #entry == 0 then
-                flatten_table_rec(res, v, entry)
+                if flatten_table_rec(res, v, entry) == nil then
+                    return nil
+                end
             else
                 res[entry[1]] = v
             end
