@@ -6,6 +6,7 @@ local yaml = require 'yaml'
 local shard = require 'shard'
 local msgpack = require 'msgpack'
 local fun = require 'fun'
+local fiber = require 'fiber'
 
 local DEFAULT_BATCH_SIZE = 1024
 local MAX_REMOTE_CONNS_TO_CACHE = 100
