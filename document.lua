@@ -170,6 +170,10 @@ local function get_schema(space)
     else
         local remote = space.connection
 
+        if not remote:is_connected() then
+            error("Can't get schema: net.box connection is not connected")
+        end
+
         local conn_id = remote
         local conn = remote_schema_cache[conn_id]
 
@@ -216,7 +220,9 @@ local function set_schema(space, schema, old_schema)
 
         local remote = space.connection
         local result = remote:call('_document_remote_set_schema', {space.id, schema, old_schema})
-        if result ~= nil then
+
+        if type(result) == "table" then
+
             remote:reload_schema()
         end
 
@@ -356,6 +362,8 @@ local function unflatten_table(tbl, schema)
     return unflatten_table_rec(tbl, schema)
 end
 
+local schema_set_in_progress = false
+
 local function flatten(space_or_schema, tbl)
 
     if tbl == nil then
@@ -395,14 +403,26 @@ local function flatten(space_or_schema, tbl)
         new_schema = extend_schema(tbl, schema)
         set_schema(space_or_schema, new_schema)
     else
+        while schema_set_in_progress do
+            fiber.sleep(0)
+        end
+        schema_set_in_progress = true
 
-        while true do
-            schema = get_schema(space_or_schema)
-            new_schema = extend_schema(tbl, schema)
-            local result = set_schema(space_or_schema, new_schema, schema)
-            if result ~= nil then
-                break
-            end
+        local res, err = pcall(function()
+                while true do
+                    schema = get_schema(space_or_schema)
+                    new_schema = extend_schema(tbl, schema)
+                    local result = set_schema(space_or_schema, new_schema, schema)
+                    if result ~= nil then
+                        break
+                    end
+                end
+        end)
+
+        schema_set_in_progress = false
+
+        if not res then
+            error(err)
         end
     end
 
