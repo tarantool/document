@@ -44,7 +44,8 @@ local function split(inputstr, sep)
         if sep == nil then
                 sep = "%s"
         end
-        local t={} ; i=1
+        local t={}
+        local i=1
         for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
                 t[i] = str
                 i = i + 1
@@ -1000,6 +1001,39 @@ local function local_tuple_select(space, query, options)
     local prepared_query = prepare_query(space, checks, options)
 
     return select_tuple_prepared(space, prepared_query)
+end
+
+local function satisfies(space, val, query)
+    local checks = {}
+
+    if query ~= nil then
+        for i=1,#query do
+            local condition = query[i]
+            validate_select_condition(condition)
+            local field = string.sub(condition[1], 2, -1)
+
+            table.insert(checks, {field_key(space, field),
+                                  condition[2],
+                                  condition[3]})
+        end
+    end
+
+    local matches = true
+
+    for _, check in ipairs(checks) do
+        local lhs = val[check[1]]
+        local op = check[2]
+        local rhs = check[3]
+
+        local status, res = pcall(cmp, op, lhs, rhs)
+
+        if not status or not res then
+            matches = false
+            break
+        end
+    end
+
+    return matches
 end
 
 local function local_tuple_count(space, query, options)
@@ -2040,4 +2074,5 @@ return {flatten = flatten,
         join_count = document_join_count,
         get = document_get,
         count = document_count,
-        tuple_join = tuple_join}
+        tuple_join = tuple_join,
+        satisfies = satisfies}
