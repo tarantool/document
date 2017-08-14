@@ -1513,7 +1513,7 @@ local function local_document_delete(space, query)
     while true do
         local batch = {}
 
-        for val in local_tuple_select(space, query, {limit=1000}) do
+        for _, val in local_tuple_select(space, query, {limit=1000}) do
             local pk = val[pk_field_no]
             table.insert(batch, pk)
         end
