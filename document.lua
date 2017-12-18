@@ -103,6 +103,17 @@ local function shallowcopy(orig)
     return copy
 end
 
+local function index_by_field_num(space, field_num)
+    for _, idx in pairs(space.index) do
+        local parts = idx.parts
+        if #parts == 1 and parts[1].fieldno == field_num then
+            return idx
+        end
+    end
+
+    return nil
+end
+
 local function flatten_schema(schema)
     local function flatten_schema_rec(res, path, schema)
         for k, v in pairs(schema) do
@@ -116,7 +127,9 @@ local function flatten_schema(schema)
             if v[1] == nil then
                 flatten_schema_rec(res, subpath, v)
             else
-                res[v[1]] = {[subpath] = v[2] }
+                local is_nullable = (v[3]==true)
+
+                res[v[1]] = {name = subpath, type = v[2], is_nullable = is_nullable}
             end
         end
     end
@@ -134,21 +147,21 @@ local function unflatten_schema(schema)
     local root = {}
 
     for i, v in ipairs(schema) do
-        for k, type_name in pairs(v) do
-            local parts = split(k, '.')
-            local node = root
-            for part_no = 1,#parts-1 do
-                local part = parts[part_no]
-                if node[part] == nil then
-                    node[part] = {}
-                end
-                node = node[part]
+        local k = v.name
+        local type_name = v.type
+        local is_nullable = v.is_nullable
+        local parts = split(k, '.')
+        local node = root
+        for part_no = 1,#parts-1 do
+            local part = parts[part_no]
+            if node[part] == nil then
+                node[part] = {}
             end
-
-            node[parts[#parts]] = {i, type_name}
+            node = node[part]
         end
-    end
 
+        node[parts[#parts]] = {i, type_name, is_nullable}
+    end
 
     return root
 end
@@ -289,7 +302,7 @@ local function extend_schema(tbl, schema)
                 schema[k] = new_schema
             elseif schema[k] == nil then
                 max_index = max_index + 1
-                schema[k] = {max_index, get_tarantool_type(v)}
+                schema[k] = {max_index, get_tarantool_type(v), true}
             end
         end
 
@@ -452,7 +465,7 @@ local function unflatten(space_or_schema, tbl)
     return unflatten_table(tbl, schema)
 end
 
-local function schema_add_path(schema, path, path_type)
+local function schema_add_path(schema, path, path_type, nullable)
     local path_dict = split(path, ".")
 
     local root = schema
@@ -467,7 +480,7 @@ local function schema_add_path(schema, path, path_type)
         else
             local max_index = schema_get_max_index(root)
 
-            schema[v] = {max_index + 1, path_type}
+            schema[v] = {max_index + 1, path_type, nullable}
         end
     end
     return root
@@ -499,7 +512,6 @@ local function schema_get_field_key(schema, path)
             return nil
         end
     end
-
 
     if type(schema[1]) == "table" then
         return nil
@@ -562,7 +574,7 @@ local function create_index(space, index_name, orig_options)
             if type(v) == "string" then
                 local field_key = schema_get_field_key(schema, v)
                 if field_key == nil then
-                    schema = schema_add_path(schema, v, options.parts[k+1])
+                    schema = schema_add_path(schema, v, options.parts[k+1], false)
                     set_schema(space, schema)
                     field_key = schema_get_field_key(schema, v)
                 end
@@ -784,16 +796,6 @@ local function shard_get_primary_key_path(candidate_space)
     return nil
 end
 
-local function index_by_field_num(space, field_num)
-    for _, idx in pairs(space.index) do
-        local parts = idx.parts
-        if #parts == 1 and parts[1].fieldno == field_num then
-            return idx
-        end
-    end
-
-    return nil
-end
 
 local function local_document_insert(space, value)
     local flat = flatten(space, value)
@@ -862,8 +864,8 @@ local function prepare_query(space, query, options)
     local space_gen = space:pairs().gen
     local skip = nil
     options = options or {}
-    limit = options.limit or nil
-    offset = options.offset or 0
+    local limit = options.limit or nil
+    local offset = options.offset or 0
 
     for i, entry in ipairs(query) do
         local idx = index_by_field_num(space, entry[1])
