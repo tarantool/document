@@ -3,7 +3,6 @@
 
 local math = require('math')
 local json = require('json')
-local shard = require('shard')
 local msgpack = require('msgpack')
 local fun = require('fun')
 local fiber = require('fiber')
@@ -729,6 +728,7 @@ end
 
 local function get_underlying_spaces(space)
     if space_type(space) == "shard" then
+        local shard = require('shard')
         local spaces = {}
 
         for _, zone in pairs(shard.shards) do
@@ -754,6 +754,8 @@ end
 
 local function shard_get_primary_key_path(candidate_space)
     local space = nil
+
+    local shard = require('shard')
 
     for _, zone in pairs(shard.shards) do
         space = zone[1].conn.space[candidate_space.name]
@@ -802,6 +804,8 @@ local function shard_document_insert(space, value)
     if shard_key == nil then
         error("doc should have " .. primary_key_path)
     end
+
+    local shard = require('shard')
 
     local nodes = shard.shard(shard_key)
     local node = nodes[1]
