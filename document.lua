@@ -1,12 +1,12 @@
 #!/usr/bin/env tarantool
+-- luacheck: globals box
 
 local math = require('math')
 local json = require('json')
-local yaml = require 'yaml'
-local shard = require 'shard'
-local msgpack = require 'msgpack'
-local fun = require 'fun'
-local fiber = require 'fiber'
+local shard = require('shard')
+local msgpack = require('msgpack')
+local fun = require('fun')
+local fiber = require('fiber')
 
 local DEFAULT_BATCH_SIZE = 1024
 local MAX_REMOTE_CONNS_TO_CACHE = 100
@@ -25,7 +25,7 @@ end
 local function is_array(table)
     local max = 0
     local count = 0
-    for k, v in pairs(table) do
+    for k, _ in pairs(table) do
         if type(k) == "number" then
             if k > max then max = k end
             count = count + 1
@@ -74,19 +74,6 @@ local function get_tarantool_type(value)
     end
 
     return nil
-end
-
-local function split(inputstr, sep)
-        if sep == nil then
-                sep = "%s"
-        end
-        local t={}
-        local i=1
-        for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
-                t[i] = str
-                i = i + 1
-        end
-        return t
 end
 
 local function shallowcopy(orig)
@@ -296,7 +283,7 @@ local function extend_schema(tbl, schema)
         schema = shallowcopy(schema)
         for k, v in pairs(tbl) do
             if type(v) == "table" and not is_array(v) then
-                local new_schema = nil
+                local new_schema
                 new_schema, max_index = extend_schema_rec(
                     v, schema[k] or {}, max_index)
                 schema[k] = new_schema
@@ -489,7 +476,7 @@ end
 local function document_get_field_by_path(doc, path)
     local path_dict = split(path, ".")
 
-    for k, v in ipairs(path_dict) do
+    for _, v in ipairs(path_dict) do
         doc = doc[v]
         if doc == nil then
             return nil
@@ -506,7 +493,7 @@ end
 local function schema_get_field_key(schema, path)
     local path_dict = split(path, ".")
 
-    for k, v in ipairs(path_dict) do
+    for _, v in ipairs(path_dict) do
         schema = schema[v]
         if schema == nil then
             return nil
@@ -521,7 +508,7 @@ local function schema_get_field_key(schema, path)
 end
 
 local function field_key(space_or_schema, path)
-    local schema = nil
+    local schema
 
     if getmetatable(space_or_schema) == nil then
         schema = space_or_schema
@@ -686,8 +673,6 @@ local function condition_type(condition)
 end
 
 local function condition_get_index(space, condition)
-    local schema = get_schema(space)
-
     if type(condition[1]) ~= "string" or not startswith(condition[1], "$") then
         return nil
     end
@@ -767,13 +752,6 @@ local function get_underlying_spaces(space)
     end
 end
 
-local function space_get_primary_key(space)
-    local idx = space.index[0]
-    local key = idx.parts[1]
-
-    return key
-end
-
 local function shard_get_primary_key_path(candidate_space)
     local space = nil
 
@@ -795,7 +773,6 @@ local function shard_get_primary_key_path(candidate_space)
 
     return nil
 end
-
 
 local function local_document_insert(space, value)
     local flat = flatten(space, value)
@@ -904,10 +881,8 @@ local function select_tuple_prepared(space, prepared_query, cache)
         primary_value,
         prepared_query[2])
 
-    --local param = {prepared_query, select_param}
-    --local state = {select_state, 0}
-    local param = nil
-    local state = nil
+    local param
+    local state
 
     if cache then
         param = cache[1]
@@ -1099,8 +1074,6 @@ end
 local function interruptible_tuple_select(space, query, options)
     options = options or {}
     local batch_size = options.batch_size or DEFAULT_BATCH_SIZE
-    local schema = get_schema(space)
-    local skip = nil
     local primary_value = nil
     local primary_field_key = space.index[0].parts[1].fieldno
     local primary_condition = nil
@@ -1123,7 +1096,6 @@ local function interruptible_tuple_select(space, query, options)
             op = op_to_tarantool(primary_condition[2])
             primary_value = primary_condition[3]
             primary_field_key = index.parts[1].fieldno
-            skip = i
             break
         end
     end
@@ -1142,8 +1114,6 @@ local function interruptible_tuple_select(space, query, options)
                               op_to_function(condition[2]),
                               condition[3]})
     end
-
-    local result = {}
 
     local last_value = nil
     local processed_primary_keys = {}
@@ -1258,7 +1228,7 @@ end
 function _document_remote_tuple_select(space_name, query, options, cursor_id)
     local space = box.space[space_name]
 
-    local cursor = nil
+    local cursor
     cursor, cursor_id = get_cursor(cursor_id)
 
     if cursor.gen == nil then
@@ -1340,7 +1310,6 @@ end
 
 local function remote_document_select(candidate_space, query, options)
     local state = nil
-    local res = nil
     local count = 0
     options = options or {}
     local limit = options.limit
@@ -1471,7 +1440,7 @@ local function document_get(space, query)
 end
 
 
-local function local_batch_tuple_select(space, queries)
+local function local_batch_tuple_select(space, queries, options)
     local result = {}
 
     for i, query in ipairs(queries) do
@@ -1486,7 +1455,7 @@ local function local_batch_tuple_select(space, queries)
     return result
 end
 
-function _document_remote_batch_tuple_select(space_name, queries)
+function _document_remote_batch_tuple_select(space_name, queries, options)
     local space = box.space[space_name]
 
     return local_batch_tuple_select(space, queries, options)
@@ -1505,7 +1474,6 @@ end
 
 local function local_document_delete(space, query)
     local pk_field_no = space.index[0].parts[1].fieldno
-    local checks = {}
 
     if query == nil or #query == 0 then
         space:truncate()
@@ -1631,7 +1599,7 @@ local function tuple_join(space1, space2, query, options)
                 right_gen, right_param, right_state = select_tuple_prepared(space2,
                                                                             right_prepared, right_cache)
             else
-                local right_val = nil
+                local right_val
 
                 right_state, right_val = right_gen(right_param, right_state)
 
@@ -1687,7 +1655,7 @@ local function remote_document_join(space1, space2, query, options)
     local batch = nil
 
     local select_next_left_space = nil
-    local get_left_space_iterator = nil
+    local select_left_space_iterator = nil
     local select_next_left_batch = nil
     local select_next_right_space = nil
     local compile_checks = nil
@@ -1778,7 +1746,7 @@ local function remote_document_join(space1, space2, query, options)
     compile_checks = function()
         compiled_query = {}
         for i, tuple in ipairs(batch) do
-            checks = {}
+            local checks = {}
             compiled_query[i] = checks
 
             for j, condition in ipairs(right_query) do
@@ -1810,8 +1778,6 @@ local function remote_document_join(space1, space2, query, options)
     end
 
     select_next_tuple = function()
-        local tuple = nil
-
         local group = tuples[group_no]
 
         if group == nil then
@@ -1884,7 +1850,7 @@ local function remote_document_join_count(space1, space2, query, options)
     local batch = nil
 
     local select_next_left_space = nil
-    local get_left_space_iterator = nil
+    local select_left_space_iterator = nil
     local select_next_left_batch = nil
     local select_next_right_space = nil
     local compile_checks = nil
@@ -1999,8 +1965,6 @@ local function remote_document_join_count(space1, space2, query, options)
     end
 
     select_next_tuple = function()
-        local tuple = nil
-
         local group = tuples[group_no]
 
         if group == nil then
@@ -2032,7 +1996,6 @@ local function remote_document_join_count(space1, space2, query, options)
         end
     end
 end
-
 
 local function local_document_join(space1, space2, query, options)
     local function tr(val)
