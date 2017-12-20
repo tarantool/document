@@ -1,7 +1,6 @@
 #!/usr/bin/env tarantool
 -- luacheck: globals box
 
-local math = require('math')
 local json = require('json')
 local msgpack = require('msgpack')
 local fun = require('fun')

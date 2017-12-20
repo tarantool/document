@@ -4,3 +4,4 @@
 *.vymeta
 .dependencies
 .*.swp
+.test
