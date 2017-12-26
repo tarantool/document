@@ -1,3 +1,5 @@
+<img src='doc/books.png' width='600' title='Document'>
+
 [Use cases](#use-cases)&nbsp; | &nbsp;[Setup](#setup)&nbsp; | &nbsp;[Status](#status)&nbsp; | &nbsp;[API](#api)&nbsp; | &nbsp;[Contact](#contacts)
 <br><br>
 [![Build Status](https://travis-ci.org/tarantool/document.svg?branch=master)](https://travis-ci.org/tarantool/document)
