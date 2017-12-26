@@ -1,7 +1,8 @@
-# Efficiently store JSON documents in Tarantool spaces
+[Use cases](#use-cases)&nbsp; | &nbsp;[Setup](#setup)&nbsp; | &nbsp;[Status](#status)&nbsp; | &nbsp;[API](#api)&nbsp; | &nbsp;[Contact](#contacts)
+<br><br>
+[![Build Status](https://travis-ci.org/tarantool/document.svg?branch=master)](https://travis-ci.org/tarantool/document)
 
-Well, not exactly JSON, but Lua tables, because Tarantool speaks
-Lua. But you can convert any JSON to a table with the `json` module.
+# Effortless JSON storage for Tarantool
 
 You may use this module to receive and store structured data you get
 from external world. It has a few important strengths:
@@ -13,8 +14,24 @@ from external world. It has a few important strengths:
 -   The module works transparently for local spaces, remote spaces and even sharded spaces!
 -   You can do "eventually consistent" selects and joins across sharded spaces!
 
+## Use cases
 
-## Example usage
+This module is suitable for projects where having a strict schema is
+not desirable. And especially for small codebases, where you don't
+want to write lots of boilerplate.
+
+## Setup
+
+This module has no outside dependencies, so you can just drop
+document.lua into the root of your project.
+
+Alternatively, you can use Tarantool package manager:
+
+```bash
+tarantoolctl rocks install document
+```
+
+## Usage
 
 Boilerplate:
 
@@ -109,8 +126,13 @@ Query examples:
 -   `{{"$id", ">", 10}, {"$id", "<", 100}}`
 -   `{{"$user.name", "==", "foo"}, {"$qty", "==", 0}}`
 
+## Status
 
-## High level API
+- The functionality for dealing with regular spaces is feature-complete
+- Serialization/deserialization should be reasonably fast for most use-cases (though, there are no benchmarks at the moment)
+- Selects/joins across sharded spaces may have bugs. There is no automated test coverage for this case.
+
+## API
 
 ### `doc.insert(space, tbl)`
 
@@ -157,3 +179,9 @@ Behaves similar to `box.space.create_index()`, but allows to specify string fiel
 ### `field_key(space, field_name)`
 
 Returns integer key for field named `field_name` in a flattened document. If you need a key for nested documents, use dot notation, like: `"foo.bar.id"`.
+
+## Contacts
+
+This module was initialy written by [Konstantin Nazarov](github.com/racktear).
+
+You can reach out to him at [mail@kn.am](mailto:mail@kn.am).
