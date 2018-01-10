@@ -7,7 +7,7 @@ source  = {
 }
 
 description = {
-    summary  = "Store nested documents in Tarantool";
+    summary  = "Effortless JSON storage for Tarantool";
     detailed = [[
 Using this module you can store and retrieve dictionaries with very little overhead. It figures out document schema on the fly, and progressively updates it when new fields are received.
     ]];

@@ -32,11 +32,14 @@ end
 local function init()
     local work_dir = script_path() .. '/.test'
 
-    local cfg = {
-        memtx_dir = work_dir,
-        vinyl_dir = work_dir,
-        wal_dir = work_dir
-    }
+    local cfg = {}
+
+    if os.getenv('TARANTOOL_VERSION') == nil then
+        cfg.memtx_dir = work_dir
+        cfg.vilyl_dir = work_dir
+        cfg.wal_dir = work_dir
+    end
+
 
     os.execute(string.format("mkdir -p '%s'", work_dir))
     box.cfg(cfg)
