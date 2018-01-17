@@ -907,6 +907,7 @@ local function select_tuple_prepared(space, prepared_query, cache)
         local select_state, count = unpack(state)
 
         while true do
+            local val
             select_state, val = space_gen(select_param, select_state)
 
             if select_state == nil then
