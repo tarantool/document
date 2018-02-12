@@ -36,7 +36,7 @@ local function init()
 
     if os.getenv('TARANTOOL_VERSION') == nil then
         cfg.memtx_dir = work_dir
-        cfg.vilyl_dir = work_dir
+        cfg.vinyl_dir = work_dir
         cfg.wal_dir = work_dir
     end
 
