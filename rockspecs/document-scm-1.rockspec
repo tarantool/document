@@ -2,7 +2,7 @@ package = 'document'
 version = 'scm-1'
 
 source  = {
-    url    = 'git://github.com/tarantool/document.git';
+    url    = 'git+https://github.com/tarantool/document.git';
     branch = 'master';
 }
 

@@ -2,7 +2,7 @@ package = 'document'
 version = '1.0.0-1'
 
 source  = {
-    url    = 'git://github.com/tarantool/document.git';
+    url    = 'git+https://github.com/tarantool/document.git';
     tag = '1.0.0';
 }
 
