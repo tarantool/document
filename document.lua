@@ -153,9 +153,11 @@ end
 
 local function get_schema(space)
     if space.connection == nil then
-        if local_schema_id ~= box.internal.schema_version() then
+        -- If Tarantool public API for schema version is not available, fallback to unreliable internal API.
+        local current_schema_id = box.info.schema_version or box.internal.schema_version()
+        if local_schema_id ~= current_schema_id then
             local_schema_cache = {}
-            local_schema_id = box.internal.schema_version()
+            local_schema_id = current_schema_id
         end
 
         local cached = local_schema_cache[space.id]
